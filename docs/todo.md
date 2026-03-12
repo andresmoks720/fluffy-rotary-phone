@@ -13,28 +13,27 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 - [x] Implement sender and receiver finite-state machines.
 - [x] Add state-transition tests (valid, invalid, timeout, retry-exhausted, cancel).
 
-## Next focus: T2 — Browser shell and audio foundation
+## Active focus: T3/T4 — Live PHY + handshake bring-up
 
-- [x] Create minimal sender screen.
-- [x] Create minimal receiver screen.
-- [x] Add file picker.
-- [x] Add start / cancel buttons.
-- [x] Add diagnostics panel shell.
-- [x] Request mic with required constraints.
-- [x] Create `AudioContext` + worklet registration skeleton.
-- [x] Wire start/cancel actions to runtime initialization shell states.
-- [x] Surface applied input/audio diagnostics in shell views.
-- [x] Add basic amplitude/clipping helper primitives.
-- [x] Create playback path.
-- [x] Register `AudioWorklet`.
-- [x] Establish TX sample path.
-- [x] Establish RX sample path.
-
-## T3 kickoff progress
-
+### T3 deliverables in progress
 - [x] Implement TX test tone generator.
 - [x] Implement RX raw sample capture.
 - [x] Add waveform debug buffer.
+- [ ] Add basic latency estimate.
+- [ ] Add drift trend measurement.
+- [ ] Decode valid live `safe` frame from RX path (not harness storage).
+
+### T4 deliverables in progress
+- [x] Sender builds `HELLO` with receiver validation path.
+- [x] Receiver sends `HELLO_ACK` and sender handles accept/reject.
+- [x] Receiver locks accepted session ID.
+- [ ] Handshake acceptance from decoded RX frames in default flow.
+- [ ] Keep storage-coupled flow debug-only.
+
+### Acceptance checks for current focus
+- [ ] Live `safe` frame decode succeeds over direct cable in repeated runs.
+- [ ] Live `HELLO`/`HELLO_ACK` proves decoded RX dependency end-to-end.
+- [ ] Diagnostics show session/turn + timeout/retry/error counters during live tests.
 
 ## Notes
 

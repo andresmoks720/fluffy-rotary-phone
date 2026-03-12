@@ -62,6 +62,10 @@ export class LiveSenderHandshake {
       throw new Error(`unsupported profile ID for sender HELLO: ${input.profileId}`);
     }
 
+    if (input.fileSizeBytes < 1n) {
+      throw new Error('file_size_bytes must be at least 1 for MVP live handshake');
+    }
+
     const payloadBytesPerFrame = defaults.payloadBytesPerFrame;
     const totalDataFrames = Number((input.fileSizeBytes + BigInt(payloadBytesPerFrame) - 1n) / BigInt(payloadBytesPerFrame));
 

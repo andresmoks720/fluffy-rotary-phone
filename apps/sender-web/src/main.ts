@@ -12,7 +12,12 @@ import {
 import { PROFILE_IDS } from '../../../packages/contract/src/index.js';
 import { crc32c } from '../../../packages/crc/src/index.js';
 import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
-import { LiveSenderHandshake } from '../../../packages/session/src/index.js';
+import {
+  createInitialLiveDiagnostics,
+  decodeLiveFrameHex,
+  LiveSenderHandshake,
+  type LiveDiagnosticsModel
+} from '../../../packages/session/src/index.js';
 
 interface SenderRuntime {
   readonly timing: LinkTimingEstimator;
@@ -21,9 +26,11 @@ interface SenderRuntime {
   readonly ctx: AudioContext;
   readonly graph: AudioGraphRuntime;
   readonly intervalId: number;
+  readonly startedAtMs: number;
 }
 
 interface SenderHarnessDiagnostics {
+  transfer: LiveDiagnosticsModel;
   frameTransmitAttempts: number;
   lastFailureReason: string | null;
   lastTransmittedFrameHex: string | null;
@@ -37,6 +44,7 @@ let senderRuntime: SenderRuntime | null = null;
 const senderHandshake = new LiveSenderHandshake();
 let lastSeenAckHex: string | null = null;
 const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
+  transfer: createInitialLiveDiagnostics({ state: 'IDLE', currentTurnOwner: 'sender' }),
   frameTransmitAttempts: 0,
   lastFailureReason: null,
   lastTransmittedFrameHex: null,
@@ -46,7 +54,6 @@ const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   handshakeReason: null
 };
 
-const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
@@ -86,27 +93,21 @@ function toHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((value) => value.toString(16).padStart(2, '0')).join('');
 }
 
-function fromHex(hex: string): Uint8Array {
-  if (hex.length % 2 !== 0) {
-    throw new Error('invalid frame hex length');
-  }
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i += 1) {
-    const value = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    if (!Number.isFinite(value)) {
-      throw new Error(`invalid frame hex byte at index ${i}`);
-    }
-    bytes[i] = value;
-  }
-  return bytes;
-}
-
 function updateHandshakeDiagnostics(): void {
   const handshake = senderHandshake.diagnostics();
   senderHarnessDiagnostics.handshakeSessionId = handshake.sessionId;
   senderHarnessDiagnostics.currentTurnOwner = handshake.currentTurnOwner;
   senderHarnessDiagnostics.handshakeResult = handshake.result;
   senderHarnessDiagnostics.handshakeReason = handshake.reason;
+  senderHarnessDiagnostics.transfer.sessionId = handshake.sessionId;
+  senderHarnessDiagnostics.transfer.currentTurnOwner = handshake.currentTurnOwner;
+  senderHarnessDiagnostics.transfer.state = handshake.result === 'pending'
+    ? 'WAIT_HELLO_ACK'
+    : handshake.result === 'accepted'
+      ? 'SEND_BURST'
+      : 'FAILED';
+  senderHarnessDiagnostics.transfer.failure.category = handshake.result === 'rejected' ? 'remote_reject' : 'none';
+  senderHarnessDiagnostics.transfer.failure.reason = handshake.reason;
 }
 
 function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): void {
@@ -148,6 +149,11 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
+  if (file.size === 0) {
+    senderHarnessDiagnostics.lastFailureReason = 'Zero-byte files are not supported by the MVP handshake. Select a non-empty file.';
+    renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
+    return;
+  }
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -162,9 +168,9 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     });
 
     playFrameOverTxPath(senderRuntime, helloBytes);
+    senderHarnessDiagnostics.transfer.counters.framesTx += 1;
     const helloHex = toHex(helloBytes);
     lastSeenAckHex = null;
-    window.localStorage.setItem(LIVE_HELLO_STORAGE_KEY, helloHex);
 
     senderHarnessDiagnostics.lastFailureReason = null;
     senderHarnessDiagnostics.lastTransmittedFrameHex = helloHex;
@@ -180,14 +186,14 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
   }
 }
 
-function maybeConsumeHelloAck(diagEl: HTMLElement): void {
-  const helloAckHex = window.localStorage.getItem(LIVE_HELLO_ACK_STORAGE_KEY);
-  if (!helloAckHex || helloAckHex === lastSeenAckHex) {
+function processHelloAckHex(diagEl: HTMLElement, helloAckHex: string): void {
+  if (helloAckHex === lastSeenAckHex) {
     return;
   }
 
   try {
-    senderHandshake.acceptHelloAck(fromHex(helloAckHex));
+    senderHandshake.acceptHelloAck(decodeLiveFrameHex(helloAckHex));
+    senderHarnessDiagnostics.transfer.counters.framesRx += 1;
     lastSeenAckHex = helloAckHex;
     updateHandshakeDiagnostics();
     renderDiagnostics(diagEl, {
@@ -198,8 +204,19 @@ function maybeConsumeHelloAck(diagEl: HTMLElement): void {
     });
   } catch (error) {
     senderHarnessDiagnostics.lastFailureReason = String(error);
+    senderHarnessDiagnostics.transfer.failure.category = 'decode_error';
+    senderHarnessDiagnostics.transfer.failure.reason = senderHarnessDiagnostics.lastFailureReason;
+    senderHarnessDiagnostics.transfer.counters.decodeFailures += 1;
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
   }
+}
+
+function maybeConsumeDebugHelloAck(diagEl: HTMLElement): void {
+  const helloAckHex = window.localStorage.getItem(LIVE_HELLO_ACK_STORAGE_KEY);
+  if (!helloAckHex) {
+    return;
+  }
+  processHelloAckHex(diagEl, helloAckHex);
 }
 
 async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTMLElement): Promise<void> {
@@ -217,6 +234,8 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
     const graph = createAudioGraphRuntime(ctx, stream);
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
+    senderHarnessDiagnostics.transfer.audio.actualSampleRateHz = runtimeInfo.sampleRate;
+    senderHarnessDiagnostics.transfer.audio.inputChannelCount = inputInfo.channelCount ?? null;
     const timing = new LinkTimingEstimator();
 
     let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
@@ -232,6 +251,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       }
       timing.recordRxSample(sampleTimestampMs, levels.rms, toneFrequencyHz !== null);
       const linkTiming = timing.snapshot();
+      senderHarnessDiagnostics.transfer.elapsedMs = senderRuntime === null ? 0 : Date.now() - senderRuntime.startedAtMs;
       updateHandshakeDiagnostics();
       renderDiagnostics(diagEl, {
         runtime: runtimeInfo,
@@ -249,10 +269,12 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
         harness: senderHarnessDiagnostics,
         message: 'Audio runtime initialized; meter active.'
       });
-      maybeConsumeHelloAck(diagEl);
+      if (root.querySelector<HTMLInputElement>('#sender-debug-storage')?.checked === true) {
+        maybeConsumeDebugHelloAck(diagEl);
+      }
     }, 200);
 
-    senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null };
+    senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
     stateEl.textContent = 'ready';
   } catch (error) {
     stateEl.textContent = 'failed';
@@ -290,6 +312,19 @@ function mountSenderShell(root: HTMLElement): void {
       </section>
 
       <section>
+        <label>
+          <input id="sender-debug-storage" type="checkbox" />
+          Enable debug HELLO_ACK ingest from localStorage
+        </label>
+      </section>
+
+      <section>
+        <label for="sender-decoded-ack-hex">Decoded RX HELLO_ACK hex</label>
+        <input id="sender-decoded-ack-hex" type="text" autocomplete="off" spellcheck="false" />
+        <button id="sender-process-ack" type="button">Process decoded HELLO_ACK</button>
+      </section>
+
+      <section>
         <h2>Diagnostics</h2>
         <pre id="sender-diag">Diagnostics pending runtime initialization.</pre>
       </section>
@@ -302,8 +337,11 @@ function mountSenderShell(root: HTMLElement): void {
   const cancelBtn = root.querySelector<HTMLButtonElement>('#sender-cancel');
   const toneBtn = root.querySelector<HTMLButtonElement>('#sender-tone-toggle');
   const sendHelloBtn = root.querySelector<HTMLButtonElement>('#sender-send-hello');
+  const processAckBtn = root.querySelector<HTMLButtonElement>('#sender-process-ack');
+  const decodedAckInput = root.querySelector<HTMLInputElement>('#sender-decoded-ack-hex');
+  const debugStorageInput = root.querySelector<HTMLInputElement>('#sender-debug-storage');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn || !processAckBtn || !decodedAckInput || !debugStorageInput) {
     throw new Error('Missing sender shell elements');
   }
 
@@ -333,6 +371,23 @@ function mountSenderShell(root: HTMLElement): void {
 
   sendHelloBtn.addEventListener('click', () => {
     void transmitHelloOverTxPath(root, diagEl);
+  });
+
+  processAckBtn.addEventListener('click', () => {
+    const helloAckHex = decodedAckInput.value.trim();
+    if (!helloAckHex) {
+      senderHarnessDiagnostics.lastFailureReason = 'Enter a decoded HELLO_ACK hex frame before processing.';
+      renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
+      return;
+    }
+    processHelloAckHex(diagEl, helloAckHex);
+  });
+
+  debugStorageInput.addEventListener('change', () => {
+    if (!debugStorageInput.checked) {
+      return;
+    }
+    maybeConsumeDebugHelloAck(diagEl);
   });
 }
 
