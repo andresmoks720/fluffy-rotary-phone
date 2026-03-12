@@ -24,6 +24,7 @@ import {
 interface SenderRuntime {
   readonly timing: LinkTimingEstimator;
   lastRecordedToneStartMs: number | null;
+  nextTxStartTimeSec: number;
   readonly stream: MediaStream;
   readonly ctx: AudioContext;
   readonly graph: AudioGraphRuntime;
@@ -187,6 +188,25 @@ function resetSenderSessionState(): void {
   senderHarnessDiagnostics.invalidTurnEvents = 0;
 }
 
+
+function prepareForHelloAttempt(): void {
+  senderHandshake.reset();
+  senderTransfer = null;
+  lastSeenAckHex = null;
+  helloAckDeadlineMs = null;
+  burstAckDeadlineMs = null;
+  finalDeadlineMs = null;
+  senderHarnessDiagnostics.transfer = createInitialLiveDiagnostics({ state: 'HELLO_TX', currentTurnOwner: 'sender' });
+  senderHarnessDiagnostics.handshakeSessionId = null;
+  senderHarnessDiagnostics.currentTurnOwner = 'sender';
+  senderHarnessDiagnostics.handshakeResult = 'pending';
+  senderHarnessDiagnostics.handshakeReason = null;
+  senderHarnessDiagnostics.transferBytesConfirmed = 0;
+  senderHarnessDiagnostics.lastFailureReason = null;
+  senderHarnessDiagnostics.transfer.failure.category = 'none';
+  senderHarnessDiagnostics.transfer.failure.reason = null;
+}
+
 function setDiagnosticsFailure(category: LiveDiagnosticsModel['failure']['category'], reason: string): void {
   senderHarnessDiagnostics.lastFailureReason = reason;
   senderHarnessDiagnostics.transfer.failure.category = category;
@@ -252,11 +272,17 @@ function updateHandshakeDiagnostics(): void {
   senderHarnessDiagnostics.handshakeReason = handshake.reason;
   senderHarnessDiagnostics.transfer.sessionId = handshake.sessionId;
   senderHarnessDiagnostics.transfer.currentTurnOwner = handshake.currentTurnOwner;
-  senderHarnessDiagnostics.transfer.state = handshake.result === 'pending'
-    ? 'WAIT_HELLO_ACK'
-    : handshake.result === 'accepted'
-      ? 'SEND_BURST'
-      : 'FAILED';
+  const transferState = senderHarnessDiagnostics.transfer.state;
+  const stateIsHandshakeOwned = transferState === 'IDLE'
+    || transferState === 'HELLO_TX'
+    || transferState === 'WAIT_HELLO_ACK';
+  if (stateIsHandshakeOwned) {
+    senderHarnessDiagnostics.transfer.state = handshake.result === 'pending'
+      ? 'WAIT_HELLO_ACK'
+      : handshake.result === 'accepted'
+        ? 'SEND_BURST'
+        : 'FAILED';
+  }
   senderHarnessDiagnostics.transfer.failure.category = handshake.result === 'rejected' ? 'remote_reject' : 'none';
   senderHarnessDiagnostics.transfer.failure.reason = handshake.reason;
 }
@@ -282,7 +308,14 @@ function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): vo
   const source = runtime.ctx.createBufferSource();
   source.buffer = output;
   source.connect(runtime.graph.txGain);
-  source.start();
+  const frameDurationSec = (chips.length * chipSamples) / runtime.ctx.sampleRate;
+  const scheduleFloorSec = runtime.ctx.currentTime + 0.005;
+  const startTimeSec = Math.max(scheduleFloorSec, runtime.nextTxStartTimeSec);
+  source.start(startTimeSec);
+  runtime.nextTxStartTimeSec = startTimeSec + frameDurationSec;
+  source.onended = () => {
+    source.disconnect();
+  };
 }
 
 function transmitFrames(frames: readonly Uint8Array[]): void {
@@ -323,6 +356,7 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
   senderHarnessDiagnostics.frameTransmitAttempts += 1;
 
   try {
+    prepareForHelloAttempt();
     const bytes = new Uint8Array(await file.arrayBuffer());
     const profileId = readSelectedProfileId(document.body);
     const sessionId = window.crypto.getRandomValues(new Uint32Array(1))[0] ?? 1;
@@ -341,10 +375,6 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     senderHarnessDiagnostics.transfer.failure.reason = null;
     senderHarnessDiagnostics.lastTransmittedFrameHex = toHex(helloBytes);
     helloAckDeadlineMs = Date.now() + TIMEOUTS_MS.HELLO_ACK;
-    burstAckDeadlineMs = null;
-    finalDeadlineMs = null;
-    senderTransfer = null;
-    lastSeenAckHex = null;
 
     updateHandshakeDiagnostics();
     renderDiagnostics(diagEl, {
@@ -583,7 +613,16 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       }
       }, 200);
 
-      senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
+      senderRuntime = {
+        stream,
+        ctx,
+        graph,
+        intervalId,
+        timing,
+        lastRecordedToneStartMs: null,
+        nextTxStartTimeSec: ctx.currentTime + 0.005,
+        startedAtMs: Date.now()
+      };
       senderHarnessDiagnostics.runtimeStartup.stage = 'ready';
       senderHarnessDiagnostics.runtimeStartup.lastSuccessAtMs = Date.now();
       stateEl.textContent = 'ready';

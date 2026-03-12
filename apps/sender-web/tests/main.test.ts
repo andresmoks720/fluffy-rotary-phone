@@ -6,6 +6,7 @@ import * as audioBrowser from '../../../packages/audio-browser/src/index.js';
 
 const startTestToneMock = vi.fn();
 const stopTestToneMock = vi.fn();
+const sourceStartTimes: number[] = [];
 
 vi.mock('../../../packages/audio-browser/src/index.js', () => {
   return {
@@ -40,6 +41,7 @@ vi.mock('../../../packages/phy-safe/src/index.js', () => ({
 
 class FakeAudioContext {
   sampleRate = 48000;
+  currentTime = 0;
   audioWorklet = { addModule: async () => undefined };
   destination = {};
   createBuffer(_ch: number, len: number): AudioBuffer {
@@ -50,7 +52,10 @@ class FakeAudioContext {
   createBufferSource(): AudioBufferSourceNode {
     return {
       connect: () => undefined,
-      start: () => undefined,
+      disconnect: () => undefined,
+      start: (when?: number) => {
+        sourceStartTimes.push(when ?? 0);
+      },
       buffer: null
     } as unknown as AudioBufferSourceNode;
   }
@@ -63,6 +68,7 @@ describe('sender web shell', () => {
     vi.restoreAllMocks();
     startTestToneMock.mockReset();
     stopTestToneMock.mockReset();
+    sourceStartTimes.length = 0;
     document.body.innerHTML = '<div id="app"></div>';
     vi.stubGlobal('AudioContext', FakeAudioContext);
     const cryptoObj = {
@@ -113,7 +119,6 @@ describe('sender web shell', () => {
 
     document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
     await Promise.resolve();
-
     const ackHex = Array.from(encodeFrame({
       version: PROTOCOL_VERSION,
       frameType: FRAME_TYPES.HELLO_ACK,
@@ -301,6 +306,66 @@ describe('sender web shell', () => {
     expect(resumedSnapshot).toContain('Select a file before sending HELLO.');
     expect(document.querySelector('#sender-diag-freeze-status')?.textContent).toContain('live');
   });
+  it('allows starting a new HELLO attempt without requiring manual reset', async () => {
+    await import('../src/main.ts');
+
+    const fileInput = document.querySelector<HTMLInputElement>('#sender-file');
+    const file = new File([new Uint8Array([1, 2, 3, 4])], 'a.bin');
+    Object.defineProperty(fileInput, 'files', {
+      configurable: true,
+      value: { 0: file, length: 1, item: (index: number) => (index === 0 ? file : null) }
+    });
+
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(diag).toContain('HELLO transmitted over live TX path');
+    expect(diag).not.toContain('sender START only valid in IDLE');
+    expect(diag).toContain('"frameTransmitAttempts": 2');
+  });
+
+  it('schedules burst frame starts monotonically to avoid overlap', async () => {
+    await import('../src/main.ts');
+
+    const fileInput = document.querySelector<HTMLInputElement>('#sender-file');
+    const file = new File([new Uint8Array([1, 2, 3, 4])], 'a.bin');
+    Object.defineProperty(fileInput, 'files', {
+      configurable: true,
+      value: { 0: file, length: 1, item: (index: number) => (index === 0 ? file : null) }
+    });
+
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+    await Promise.resolve();
+    const helloStart = sourceStartTimes[sourceStartTimes.length - 1] ?? 0;
+
+    const ackHex = Array.from(encodeFrame({
+      version: PROTOCOL_VERSION,
+      frameType: FRAME_TYPES.HELLO_ACK,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x12345678,
+      acceptCode: 0x00,
+      acceptedPayloadBytesPerFrame: 512,
+      acceptedFramesPerBurst: 8
+    })).map((v) => v.toString(16).padStart(2, '0')).join('');
+
+    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:sender-decoded-rx-frame', {
+      detail: { frameHex: ackHex, frameType: 'HELLO_ACK', classification: 'ok' }
+    }));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const burstStart = sourceStartTimes[sourceStartTimes.length - 1] ?? 0;
+    expect(sourceStartTimes.length).toBeGreaterThanOrEqual(2);
+    expect(burstStart).toBeGreaterThan(helloStart);
+  });
+
 
   it('copies diagnostics snapshot to clipboard', async () => {
     await import('../src/main.ts');
