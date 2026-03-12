@@ -244,6 +244,7 @@ The session protocol coordinates:
 ### File handling
 
 - Sender reads exactly one file per session.
+- MVP sender must reject zero-byte files before emitting `HELLO`; empty-file transfer is out of scope for MVP.
 - Receiver allocates one in-memory buffer equal to the declared file size.
 - Receiver writes payload bytes into that buffer using absolute file offsets from `DATA` frames.
 - Receiver saves the file only after full validation and `FINAL_OK` state.

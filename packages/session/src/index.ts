@@ -7,3 +7,6 @@ export * from './shared.js';
 export * from './sender/sender_controller.js';
 export * from './receiver/receiver_controller.js';
 export * from './live_handshake.js';
+
+export * from './live_hex.js';
+export * from './live_diagnostics.js';

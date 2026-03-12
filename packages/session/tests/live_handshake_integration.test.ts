@@ -127,6 +127,19 @@ describe('live handshake integration', () => {
     expect(oversizeResult.diagnostics.reason).toContain('exceeds MVP max size');
   });
 
+
+  it('rejects zero-byte files before HELLO encode to avoid invalid metadata', () => {
+    const sender = new LiveSenderHandshake();
+
+    expect(() => sender.emitHello({
+      sessionId: 0x30000001,
+      fileNameUtf8: asUtf8('empty.bin'),
+      fileSizeBytes: 0n,
+      fileCrc32c: 0x00000000,
+      profileId: PROFILE_IDS.SAFE
+    })).toThrow(/at least 1/);
+  });
+
   it('rejects HELLO deterministically when memory preflight budget is insufficient', () => {
     const sender = new LiveSenderHandshake();
     const receiver = new LiveReceiverHandshake({
