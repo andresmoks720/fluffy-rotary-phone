@@ -75,6 +75,12 @@ describe('sender web shell', () => {
       configurable: true,
       value: cryptoObj
     });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn(async () => undefined)
+      }
+    });
     Object.defineProperty(File.prototype, 'arrayBuffer', {
       configurable: true,
       value: async function arrayBuffer(): Promise<ArrayBuffer> {
@@ -277,6 +283,40 @@ describe('sender web shell', () => {
     expect(diag).toContain('"frameTransmitAttempts": 0');
     expect(diag).toContain('"category": "input_validation"');
   });
+
+  it('freezes diagnostics rendering and resumes with latest pending snapshot', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-diag-freeze-toggle')?.click();
+    const frozenSnapshot = document.querySelector('#sender-diag')?.textContent ?? '';
+
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(document.querySelector('#sender-diag')?.textContent ?? '').toBe(frozenSnapshot);
+    expect(document.querySelector('#sender-diag-freeze-status')?.textContent).toContain('frozen');
+
+    document.querySelector<HTMLButtonElement>('#sender-diag-freeze-toggle')?.click();
+    const resumedSnapshot = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(resumedSnapshot).toContain('Select a file before sending HELLO.');
+    expect(document.querySelector('#sender-diag-freeze-status')?.textContent).toContain('live');
+  });
+
+  it('copies diagnostics snapshot to clipboard', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-diag-copy')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const writeText = vi.mocked(navigator.clipboard.writeText);
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect((writeText.mock.calls[0]?.[0] ?? '')).toContain('Diagnostics pending runtime initialization');
+
+    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(diag).toContain('Diagnostics copied to clipboard.');
+    expect(diag).toContain('"clipboard"');
+  });
+
 
   it('includes staged startup diagnostics when worklet module registration fails', async () => {
     vi.mocked(audioBrowser.registerWorklet).mockRejectedValue(new DOMException("Unable to load a worklet's module.", 'AbortError'));
