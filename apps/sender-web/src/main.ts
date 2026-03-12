@@ -55,6 +55,8 @@ const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-
 const SENDER_DECODED_RX_EVENT = 'fluffy-rotary-phone:sender-decoded-rx-frame';
 
 let senderRuntime: SenderRuntime | null = null;
+let senderStartInFlight: Promise<void> | null = null;
+let decodedRxEventListener: ((event: Event) => void) | null = null;
 const senderHandshake = new LiveSenderHandshake();
 let senderTransfer: LiveSenderTransfer | null = null;
 let lastSeenAckHex: string | null = null;
@@ -385,27 +387,33 @@ function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDe
 }
 
 async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTMLElement): Promise<void> {
-  stopSenderRuntime();
-  resetSenderSessionState();
-  stateEl.textContent = 'starting';
+  if (senderStartInFlight) {
+    await senderStartInFlight;
+    return;
+  }
 
-  try {
-    const stream = await requestMicStream(window.navigator);
-    const track = stream.getAudioTracks()[0];
-    if (!track) throw new Error('No audio track available');
+  const startPromise = (async () => {
+    stopSenderRuntime();
+    resetSenderSessionState();
+    stateEl.textContent = 'starting';
 
-    const ctx = new AudioContext();
-    await registerWorklet(ctx, '/meter_processor.js');
+    try {
+      const stream = await requestMicStream(window.navigator);
+      const track = stream.getAudioTracks()[0];
+      if (!track) throw new Error('No audio track available');
 
-    const graph = createAudioGraphRuntime(ctx, stream);
-    const runtimeInfo = collectAudioRuntimeInfo(ctx);
-    const inputInfo = readInputTrackDiagnostics(track);
-    senderHarnessDiagnostics.transfer.audio.actualSampleRateHz = runtimeInfo.sampleRate;
-    senderHarnessDiagnostics.transfer.audio.inputChannelCount = inputInfo.channelCount ?? null;
-    const timing = new LinkTimingEstimator();
+      const ctx = new AudioContext();
+      await registerWorklet(ctx, '/meter_processor.js');
 
-    let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
-    const intervalId = window.setInterval(() => {
+      const graph = createAudioGraphRuntime(ctx, stream);
+      const runtimeInfo = collectAudioRuntimeInfo(ctx);
+      const inputInfo = readInputTrackDiagnostics(track);
+      senderHarnessDiagnostics.transfer.audio.actualSampleRateHz = runtimeInfo.sampleRate;
+      senderHarnessDiagnostics.transfer.audio.inputChannelCount = inputInfo.channelCount ?? null;
+      const timing = new LinkTimingEstimator();
+
+      let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
+      const intervalId = window.setInterval(() => {
       levels = sampleAnalyserLevels(graph.rxAnalyser);
       const toneFrequencyHz = graph.testToneFrequencyHz;
       const sampleTimestampMs = Date.now();
@@ -467,14 +475,31 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       if (SHOW_DEBUG_CONTROLS && root.querySelector<HTMLInputElement>('#sender-debug-storage')?.checked === true) {
         maybeConsumeDebugHelloAck(diagEl);
       }
-    }, 200);
+      }, 200);
 
-    senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
-    stateEl.textContent = 'ready';
-  } catch (error) {
-    resetSenderSessionState();
-    stateEl.textContent = 'failed';
-    renderDiagnostics(diagEl, { error: String(error) });
+      senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
+      stateEl.textContent = 'ready';
+    } catch (error) {
+      resetSenderSessionState();
+      stateEl.textContent = 'failed';
+      senderHarnessDiagnostics.lastFailureReason = `Sender runtime startup failed: ${String(error)}`;
+      senderHarnessDiagnostics.transfer.failure.category = 'unknown';
+      senderHarnessDiagnostics.transfer.failure.reason = senderHarnessDiagnostics.lastFailureReason;
+      renderDiagnostics(diagEl, {
+        harness: senderHarnessDiagnostics,
+        error: senderHarnessDiagnostics.lastFailureReason,
+        message: 'Sender runtime startup failed during auto-start or explicit start request.'
+      });
+    }
+  })();
+
+  senderStartInFlight = startPromise;
+  try {
+    await startPromise;
+  } finally {
+    if (senderStartInFlight === startPromise) {
+      senderStartInFlight = null;
+    }
   }
 }
 
@@ -547,10 +572,14 @@ export function mountSenderShell(root: HTMLElement): void {
     throw new Error('Missing sender shell elements');
   }
 
-  window.addEventListener(SENDER_DECODED_RX_EVENT, (event: Event) => {
+  if (decodedRxEventListener) {
+    window.removeEventListener(SENDER_DECODED_RX_EVENT, decodedRxEventListener);
+  }
+  decodedRxEventListener = (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
     handleDecodedRxEvent(diagEl, event.detail as DecodedRxFrameEventDetail);
-  });
+  };
+  window.addEventListener(SENDER_DECODED_RX_EVENT, decodedRxEventListener);
 
   startBtn.addEventListener('click', () => {
     void startSender(root, stateEl, diagEl);
@@ -565,20 +594,30 @@ export function mountSenderShell(root: HTMLElement): void {
 
   toneBtn.addEventListener('click', () => {
     void (async () => {
-      if (!senderRuntime) {
-        await startSender(root, stateEl, diagEl);
-      }
-      if (!senderRuntime) {
-        renderDiagnostics(diagEl, { error: 'Unable to start sender runtime; cannot toggle tone.' });
-        return;
-      }
+      try {
+        if (!senderRuntime) {
+          await startSender(root, stateEl, diagEl);
+        }
+        if (!senderRuntime) {
+          return;
+        }
 
-      if (senderRuntime.graph.testToneFrequencyHz !== null) {
-        senderRuntime.graph.stopTestTone();
-        return;
-      }
+        if (senderRuntime.graph.testToneFrequencyHz !== null) {
+          senderRuntime.graph.stopTestTone();
+          return;
+        }
 
-      senderRuntime.graph.startTestTone(readTestToneFrequency(root));
+        senderRuntime.graph.startTestTone(readTestToneFrequency(root));
+      } catch (error) {
+        senderHarnessDiagnostics.lastFailureReason = `Tone toggle failed: ${String(error)}`;
+        senderHarnessDiagnostics.transfer.failure.category = 'unknown';
+        senderHarnessDiagnostics.transfer.failure.reason = senderHarnessDiagnostics.lastFailureReason;
+        renderDiagnostics(diagEl, {
+          harness: senderHarnessDiagnostics,
+          error: senderHarnessDiagnostics.lastFailureReason,
+          message: 'Unexpected tone toggle failure.'
+        });
+      }
     })();
   });
 

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FLAGS_MVP_DEFAULT, FRAME_TYPES, PROFILE_IDS, PROTOCOL_VERSION } from '../../../packages/contract/src/index.js';
 import { encodeFrame } from '../../../packages/protocol/src/index.js';
+import * as audioBrowser from '../../../packages/audio-browser/src/index.js';
 
 const startTestToneMock = vi.fn();
 const stopTestToneMock = vi.fn();
@@ -184,5 +185,81 @@ describe('sender web shell', () => {
     expect(startTestToneMock).toHaveBeenCalledTimes(1);
     expect(startTestToneMock).toHaveBeenCalledWith(1000);
     expect(document.querySelector('#sender-diag')?.textContent ?? '').not.toContain('Start sender runtime before toggling tone');
+  });
+
+  it('preserves startup root cause diagnostics when tone auto-start fails', async () => {
+    vi.mocked(audioBrowser.requestMicStream).mockRejectedValueOnce(new Error('Permission denied by browser'));
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-tone-toggle')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'failed'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(document.querySelector('#sender-state')?.textContent).toBe('failed');
+    expect(diag).toContain('Sender runtime startup failed: Error: Permission denied by browser');
+    expect(diag).not.toContain('Unable to start sender runtime; cannot toggle tone.');
+  });
+
+  it('deduplicates concurrent auto-start requests from rapid tone toggles', async () => {
+    let resolveStart: ((value: MediaStream) => void) | null = null;
+    const delayedStart = new Promise<MediaStream>((resolve) => {
+      resolveStart = resolve;
+    });
+    vi.mocked(audioBrowser.requestMicStream).mockReturnValueOnce(delayedStart);
+
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-tone-toggle')?.click();
+    document.querySelector<HTMLButtonElement>('#sender-tone-toggle')?.click();
+
+    expect(audioBrowser.requestMicStream).toHaveBeenCalledTimes(1);
+
+    resolveStart?.({
+      getAudioTracks: () => [{ stop: vi.fn() }],
+      getTracks: () => [{ stop: vi.fn() }]
+    } as unknown as MediaStream);
+
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(document.querySelector('#sender-state')?.textContent).toBe('ready');
+  });
+
+  it('keeps decoded RX event listener single-mounted across remounts', async () => {
+    const senderMain = await import('../src/main.ts');
+    const remountRoot = document.createElement('div');
+    senderMain.mountSenderShell(remountRoot);
+
+    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:sender-decoded-rx-frame', {
+      detail: {
+        frameHex: '00',
+        frameType: 'UNEXPECTED_TYPE',
+        classification: 'ok'
+      }
+    }));
+
+    const diag = remountRoot.querySelector('#sender-diag')?.textContent ?? '';
+    expect(diag).toContain('unexpected decoded frame type for sender shell: UNEXPECTED_TYPE');
+    expect(diag).toContain('"invalidTurnEvents": 1');
+  });
+
+  it('captures unexpected tone-toggle runtime errors without unhandled rejection', async () => {
+    startTestToneMock.mockImplementationOnce(() => {
+      throw new Error('Injected tone failure');
+    });
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-tone-toggle')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(diag).toContain('Tone toggle failed: Error: Injected tone failure');
+    expect(diag).toContain('Unexpected tone toggle failure.');
   });
 });
