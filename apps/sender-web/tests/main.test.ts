@@ -263,13 +263,17 @@ describe('sender web shell', () => {
     expect(diag).toContain('Unexpected tone toggle failure.');
   });
 
-  it('does not count HELLO transmit attempts when runtime is not started', async () => {
+  it('auto-starts runtime before HELLO and keeps attempts at zero when no file is selected', async () => {
     await import('../src/main.ts');
 
     document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
 
     const diag = document.querySelector('#sender-diag')?.textContent ?? '';
-    expect(diag).toContain('Start sender runtime before transmitting HELLO.');
+    expect(document.querySelector('#sender-state')?.textContent).toBe('ready');
+    expect(diag).toContain('Select a file before sending HELLO.');
     expect(diag).toContain('"frameTransmitAttempts": 0');
     expect(diag).toContain('"category": "input_validation"');
   });

@@ -255,7 +255,15 @@ function transmitFrames(frames: readonly Uint8Array[]): void {
 
 async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): Promise<void> {
   if (!senderRuntime) {
-    setDiagnosticsFailure('input_validation', 'Start sender runtime before transmitting HELLO.');
+    const stateEl = root.querySelector<HTMLElement>('#sender-state');
+    if (!stateEl) {
+      throw new Error('Missing sender state element');
+    }
+    await startSender(root, stateEl, diagEl);
+  }
+
+  if (!senderRuntime) {
+    setDiagnosticsFailure('input_validation', 'Unable to start sender runtime before transmitting HELLO.');
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
