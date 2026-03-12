@@ -64,4 +64,52 @@ describe('session controllers', () => {
 
     expect(sender.dispatch({ type: 'FINAL', sessionId: sid, ok: true }).state).toBe('SUCCESS');
   });
+
+
+  it('increments timeout retry counters exactly once per timeout event', () => {
+    const sender = new SenderController();
+    sender.dispatch({ type: 'START', sessionId: 0x77777777 });
+    sender.dispatch({ type: 'HELLO_SENT' });
+
+    const t1 = sender.dispatch({ type: 'TIMEOUT', phase: 'HELLO_ACK' });
+    expect(t1.retries.hello).toBe(1);
+    sender.dispatch({ type: 'HELLO_SENT' });
+
+    const t2 = sender.dispatch({ type: 'TIMEOUT', phase: 'HELLO_ACK' });
+    expect(t2.retries.hello).toBe(2);
+    expect(t2.state).toBe('HELLO_TX');
+  });
+
+  it('rejects duplicate final frames once sender is terminal failed', () => {
+    const sid = 0x88888888;
+    const sender = new SenderController();
+
+    sender.dispatch({ type: 'START', sessionId: sid });
+    sender.dispatch({ type: 'HELLO_SENT' });
+    sender.dispatch({ type: 'HELLO_ACK', sessionId: sid, accepted: true });
+    sender.dispatch({ type: 'BURST_SENT' });
+    sender.dispatch({ type: 'BURST_ACK', sessionId: sid, allAcked: true });
+    sender.dispatch({ type: 'END_SENT' });
+    sender.dispatch({ type: 'FINAL', sessionId: sid, ok: false });
+
+    expect(() => sender.dispatch({ type: 'FINAL', sessionId: sid, ok: false })).toThrow(/invalid turn owner/);
+    expect(sender.snapshot().state).toBe('FAILED');
+  });
+
+  it('is idempotent for duplicate END on receiver after success', () => {
+    const sid = 0x99999999;
+    const receiver = new ReceiverController();
+
+    receiver.dispatch({ type: 'HELLO', sessionId: sid, valid: true });
+    receiver.dispatch({ type: 'DATA_START', sessionId: sid });
+    receiver.dispatch({ type: 'BURST_COMPLETE', sessionId: sid });
+    receiver.dispatch({ type: 'DATA_COMPLETE', sessionId: sid });
+    receiver.dispatch({ type: 'END', sessionId: sid, valid: true });
+    receiver.dispatch({ type: 'FINAL_SENT' });
+
+    const duplicateEnd = receiver.dispatch({ type: 'END', sessionId: sid, valid: true });
+    expect(duplicateEnd.state).toBe('SUCCESS');
+    expect(receiver.snapshot().sessionId).toBe(sid);
+  });
+
 });

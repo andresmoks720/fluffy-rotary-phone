@@ -95,6 +95,47 @@ describe('audio diagnostics helpers', () => {
     expect(snapshot.driftTrendMsPerMin!).toBeLessThan(0);
   });
 
+
+
+  it('exposes requested vs applied settings distinctly', () => {
+    const requested = {
+      audio: {
+        channelCount: 1,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      },
+      video: false
+    };
+    const fakeTrack = {
+      getSettings: () => ({
+        sampleRate: 48000,
+        channelCount: 2,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      })
+    } as unknown as MediaStreamTrack;
+
+    const applied = readInputTrackDiagnostics(fakeTrack);
+    expect(requested.audio.channelCount).toBe(1);
+    expect(applied.channelCount).toBe(2);
+    expect(requested.audio.echoCancellation).toBe(false);
+    expect(applied.echoCancellation).toBe(true);
+  });
+
+  it('reports actual audio context sample rate explicitly', () => {
+    const fakeContext = {
+      sampleRate: 44100,
+      baseLatency: 0.01,
+      outputLatency: 0.02,
+      state: 'running'
+    } as unknown as AudioContext;
+
+    const runtime = collectAudioRuntimeInfo(fakeContext);
+    expect(runtime.sampleRate).toBe(44100);
+  });
+
   it('returns null estimates when data is insufficient', () => {
     const estimator = new LinkTimingEstimator();
 
@@ -111,5 +152,66 @@ describe('audio diagnostics helpers', () => {
     expect(snapshot.oneWayLatencyEstimateMs).toBeCloseTo(120, 6);
     expect(snapshot.driftTrendPpm).toBeNull();
     expect(snapshot.driftTrendMsPerMin).toBeNull();
+  });
+});
+
+
+describe('diagnostics estimator invariants', () => {
+  it('converges after a latency step change within bounded samples', () => {
+    const estimator = new LinkTimingEstimator({ shortWindowSize: 4, longWindowSize: 32 });
+
+    for (let i = 0; i < 8; i += 1) {
+      const tx = i * 100;
+      estimator.recordTxToneStart(tx);
+      estimator.recordRxSample(tx + 80, 0.2, true);
+      estimator.recordRxSample(tx + 90, 0, false);
+    }
+
+    for (let i = 8; i < 20; i += 1) {
+      const tx = i * 100;
+      estimator.recordTxToneStart(tx);
+      estimator.recordRxSample(tx + 140, 0.2, true);
+      estimator.recordRxSample(tx + 150, 0, false);
+    }
+
+    const snapshot = estimator.snapshot();
+    expect(snapshot.oneWayLatencyEstimateMs).toBeCloseTo(140, 6);
+    expect(snapshot.matchedLatencySampleCount).toBe(20);
+  });
+
+  it('keeps diagnostics finite under stress updates', () => {
+    const estimator = new LinkTimingEstimator({ shortWindowSize: 8, longWindowSize: 16 });
+
+    for (let i = 0; i < 100; i += 1) {
+      const tx = i * 33;
+      estimator.recordTxToneStart(tx);
+      estimator.recordRxSample(tx + 100 + (i % 3), 0.2, true);
+      estimator.recordRxSample(tx + 110 + (i % 3), 0, false);
+    }
+
+    const snapshot = estimator.snapshot();
+    expect(Number.isFinite(snapshot.oneWayLatencyEstimateMs!)).toBe(true);
+    expect(Number.isFinite(snapshot.driftTrendPpm!)).toBe(true);
+    expect(Number.isFinite(snapshot.driftTrendMsPerMin!)).toBe(true);
+    expect(Number.isFinite(snapshot.matchedLatencySampleCount)).toBe(true);
+    expect(Number.isFinite(snapshot.pendingTxToneCount)).toBe(true);
+  });
+
+  it('maintains counter invariants for matched and pending counts', () => {
+    const estimator = new LinkTimingEstimator({ longWindowSize: 8 });
+
+    estimator.recordTxToneStart(1000);
+    estimator.recordTxToneStart(2000);
+    estimator.recordTxToneStart(3000);
+
+    estimator.recordRxSample(1100, 0.2, true);
+    estimator.recordRxSample(1150, 0, false);
+    estimator.recordRxSample(2200, 0.2, true);
+    estimator.recordRxSample(2250, 0, false);
+
+    const snapshot = estimator.snapshot();
+    expect(snapshot.matchedLatencySampleCount).toBe(2);
+    expect(snapshot.pendingTxToneCount).toBe(1);
+    expect(snapshot.matchedLatencySampleCount + snapshot.pendingTxToneCount).toBe(3);
   });
 });
