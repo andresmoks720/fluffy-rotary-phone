@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FLAGS_MVP_DEFAULT, FRAME_TYPES, PROFILE_IDS, PROTOCOL_VERSION } from '../../../packages/contract/src/index.js';
 import { encodeFrame } from '../../../packages/protocol/src/index.js';
 
+const startTestToneMock = vi.fn();
+const stopTestToneMock = vi.fn();
+
 vi.mock('../../../packages/audio-browser/src/index.js', () => {
   return {
     collectAudioRuntimeInfo: () => ({ sampleRate: 48000 }),
@@ -11,8 +14,8 @@ vi.mock('../../../packages/audio-browser/src/index.js', () => {
       txGain: {},
       testToneFrequencyHz: null,
       testToneStartedAtMs: null,
-      startTestTone: vi.fn(),
-      stopTestTone: vi.fn(),
+      startTestTone: startTestToneMock,
+      stopTestTone: stopTestToneMock,
       dispose: vi.fn()
     }),
     readInputTrackDiagnostics: () => ({ channelCount: 1 }),
@@ -55,7 +58,10 @@ class FakeAudioContext {
 
 describe('sender web shell', () => {
   beforeEach(() => {
+    vi.resetModules();
     vi.restoreAllMocks();
+    startTestToneMock.mockReset();
+    stopTestToneMock.mockReset();
     document.body.innerHTML = '<div id="app"></div>';
     vi.stubGlobal('AudioContext', FakeAudioContext);
     const cryptoObj = {
@@ -164,5 +170,19 @@ describe('sender web shell', () => {
     document.querySelector<HTMLButtonElement>('#sender-cancel')?.click();
     expect(document.querySelector('#sender-state')?.textContent).toBe('cancelled');
     expect(document.querySelector('#sender-diag')?.textContent ?? '').toContain('"sessionId": null');
+  });
+
+  it('starts runtime automatically before toggling tone', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-tone-toggle')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(document.querySelector('#sender-state')?.textContent).toBe('ready');
+    expect(startTestToneMock).toHaveBeenCalledTimes(1);
+    expect(startTestToneMock).toHaveBeenCalledWith(1000);
+    expect(document.querySelector('#sender-diag')?.textContent ?? '').not.toContain('Start sender runtime before toggling tone');
   });
 });
