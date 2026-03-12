@@ -31,6 +31,12 @@ interface ReceiverRuntime {
   readonly startedAtMs: number;
 }
 
+interface DecodedRxFrameEventDetail {
+  readonly frameHex: string;
+  readonly frameType?: string;
+  readonly classification?: 'ok' | 'decode_error' | 'header_crc_failure' | 'payload_crc_failure' | 'timeout' | 'retry';
+}
+
 interface ReceiverHandshakeDiagnostics {
   transfer: LiveDiagnosticsModel;
   sessionId: number | null;
@@ -40,6 +46,11 @@ interface ReceiverHandshakeDiagnostics {
   processedHelloCount: number;
   lastFailureReason: string | null;
 }
+
+const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('debug') === '1';
+const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
+const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
+const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame';
 
 let receiverRuntime: ReceiverRuntime | null = null;
 const receiverHandshake = new LiveReceiverHandshake();
@@ -58,9 +69,6 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   processedHelloCount: 0,
   lastFailureReason: null
 };
-
-const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
-const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   el.textContent = JSON.stringify(data, null, 2);
@@ -85,6 +93,36 @@ function updateHandshakeDiagnostics(): void {
       : 'FAILED';
   handshakeDiagnostics.transfer.failure.category = snapshot.result === 'rejected' ? 'remote_reject' : 'none';
   handshakeDiagnostics.transfer.failure.reason = snapshot.reason;
+}
+
+function applyDecodeClassification(classification: DecodedRxFrameEventDetail['classification']): void {
+  switch (classification) {
+    case 'decode_error':
+      handshakeDiagnostics.transfer.counters.decodeFailures += 1;
+      handshakeDiagnostics.transfer.failure.category = 'decode_error';
+      handshakeDiagnostics.transfer.failure.reason = 'decoded RX frame classified as decode_error';
+      break;
+    case 'header_crc_failure':
+      handshakeDiagnostics.transfer.counters.crcFailuresHeader += 1;
+      handshakeDiagnostics.transfer.failure.category = 'crc_failure';
+      handshakeDiagnostics.transfer.failure.reason = 'header CRC failure in decoded RX frame';
+      break;
+    case 'payload_crc_failure':
+      handshakeDiagnostics.transfer.counters.crcFailuresPayload += 1;
+      handshakeDiagnostics.transfer.failure.category = 'crc_failure';
+      handshakeDiagnostics.transfer.failure.reason = 'payload CRC failure in decoded RX frame';
+      break;
+    case 'timeout':
+      handshakeDiagnostics.transfer.counters.timeoutsBurstAck += 1;
+      handshakeDiagnostics.transfer.failure.category = 'timeout';
+      handshakeDiagnostics.transfer.failure.reason = 'decoded RX timeout classification';
+      break;
+    case 'retry':
+      handshakeDiagnostics.transfer.counters.retransmissions += 1;
+      break;
+    default:
+      break;
+  }
 }
 
 function playFrameOverTxPath(runtime: ReceiverRuntime, frameBytes: Uint8Array): void {
@@ -123,6 +161,18 @@ function stopReceiverRuntime(): void {
   waveformDebugBuffer = [];
 }
 
+function resetReceiverSessionState(): void {
+  receiverHandshake.reset();
+  lastSeenHelloHex = null;
+  handshakeDiagnostics.transfer = createInitialLiveDiagnostics({ state: 'LISTEN', currentTurnOwner: 'sender' });
+  handshakeDiagnostics.sessionId = null;
+  handshakeDiagnostics.currentTurnOwner = 'sender';
+  handshakeDiagnostics.handshakeResult = 'pending';
+  handshakeDiagnostics.handshakeReason = null;
+  handshakeDiagnostics.processedHelloCount = 0;
+  handshakeDiagnostics.lastFailureReason = null;
+}
+
 function captureRxSnapshot(diagEl: HTMLElement): void {
   if (!receiverRuntime) {
     renderDiagnostics(diagEl, { error: 'Start receiver runtime before capturing RX samples.' });
@@ -136,7 +186,13 @@ function captureRxSnapshot(diagEl: HTMLElement): void {
   };
 }
 
-function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToStorage: boolean): void {
+function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToStorage: boolean, classification: DecodedRxFrameEventDetail['classification'] = 'ok'): void {
+  applyDecodeClassification(classification);
+  if (classification !== 'ok') {
+    renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Decoded RX frame classification handled.' });
+    return;
+  }
+
   if (helloHex === lastSeenHelloHex || !receiverRuntime) {
     return;
   }
@@ -158,8 +214,8 @@ function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToS
       handshake: handshakeDiagnostics,
       transmittedHelloAckHex: ackHex,
       message: handshakeDiagnostics.handshakeResult === 'accepted'
-        ? 'HELLO accepted and HELLO_ACK transmitted over receiver TX path.'
-        : `HELLO rejected and HELLO_ACK transmitted: ${handshakeDiagnostics.handshakeReason ?? 'unknown reason'}`
+        ? 'HELLO accepted from decoded RX event and HELLO_ACK transmitted over receiver TX path.'
+        : `HELLO rejected from decoded RX event and HELLO_ACK transmitted: ${handshakeDiagnostics.handshakeReason ?? 'unknown reason'}`
     });
   } catch (error) {
     handshakeDiagnostics.lastFailureReason = String(error);
@@ -173,16 +229,26 @@ function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToS
   }
 }
 
-function maybeProcessDebugHello(diagEl: HTMLElement): void {
-  const helloHex = window.localStorage.getItem(LIVE_HELLO_STORAGE_KEY);
-  if (!helloHex) {
+function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
+  if (detail.frameType && detail.frameType !== 'HELLO') {
+    handshakeDiagnostics.transfer.counters.decodeFailures += 1;
+    handshakeDiagnostics.transfer.failure.category = 'decode_error';
+    handshakeDiagnostics.transfer.failure.reason = `unexpected decoded frame type for receiver handshake: ${detail.frameType}`;
+    renderDiagnostics(diagEl, { handshake: handshakeDiagnostics });
     return;
   }
-  processHelloHex(diagEl, helloHex, true);
+  processHelloHex(diagEl, detail.frameHex, false, detail.classification ?? 'ok');
+}
+
+function maybeProcessDebugHello(diagEl: HTMLElement): void {
+  const helloHex = window.localStorage.getItem(LIVE_HELLO_STORAGE_KEY);
+  if (!helloHex) return;
+  processHelloHex(diagEl, helloHex, true, 'ok');
 }
 
 async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugStorageEnabled: () => boolean): Promise<void> {
   stopReceiverRuntime();
+  resetReceiverSessionState();
   stateEl.textContent = 'starting';
 
   try {
@@ -216,11 +282,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
       timing.recordRxSample(sampleTimestampMs, levels.rms, toneFrequencyHz !== null);
       const linkTiming = timing.snapshot();
       handshakeDiagnostics.transfer.elapsedMs = receiverRuntime === null ? 0 : Date.now() - receiverRuntime.startedAtMs;
-      waveformDebugBuffer = appendWaveformDebugEntry(
-        waveformDebugBuffer,
-        { timestampMs: Date.now(), levels },
-        16
-      );
+      waveformDebugBuffer = appendWaveformDebugEntry(waveformDebugBuffer, { timestampMs: Date.now(), levels }, 16);
 
       updateHandshakeDiagnostics();
       renderDiagnostics(diagEl, {
@@ -233,14 +295,15 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
         },
         rxCapture: lastCapture,
         linkTiming,
+        decodedRxEvent: RECEIVER_DECODED_RX_EVENT,
         waveformDebug: {
           entryCount: waveformDebugBuffer.length,
           recent: waveformDebugBuffer
         },
         handshake: handshakeDiagnostics,
-        message: 'Receiver listening shell initialized; meter active.'
+        message: 'Receiver listening shell initialized; awaiting decoded RX events.'
       });
-      if (isDebugStorageEnabled()) {
+      if (SHOW_DEBUG_CONTROLS && isDebugStorageEnabled()) {
         maybeProcessDebugHello(diagEl);
       }
     }, 200);
@@ -248,16 +311,35 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     receiverRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
     stateEl.textContent = 'listen';
   } catch (error) {
+    resetReceiverSessionState();
     stateEl.textContent = 'failed';
     renderDiagnostics(diagEl, { error: String(error) });
   }
 }
 
-function mountReceiverShell(root: HTMLElement): void {
+export function mountReceiverShell(root: HTMLElement): void {
+  const debugControls = SHOW_DEBUG_CONTROLS
+    ? `
+      <section>
+        <details>
+          <summary>Developer debug controls (manual bridge; not default flow)</summary>
+          <label>
+            <input id="receiver-debug-storage" type="checkbox" />
+            Enable debug HELLO ingest from localStorage
+          </label>
+          <label for="receiver-debug-hello-hex">Manual decoded HELLO hex (debug only)</label>
+          <input id="receiver-debug-hello-hex" type="text" autocomplete="off" spellcheck="false" />
+          <button id="receiver-debug-hello-process" type="button">Process manual debug HELLO</button>
+        </details>
+      </section>
+    `
+    : '';
+
   root.innerHTML = `
     <main>
       <h1>Audio Modem Receiver</h1>
       <p>State: <strong id="receiver-state">idle</strong></p>
+      <p>Decoded RX source: custom event <code>${RECEIVER_DECODED_RX_EVENT}</code></p>
 
       <section>
         <button id="receiver-start" type="button">Start</button>
@@ -265,18 +347,7 @@ function mountReceiverShell(root: HTMLElement): void {
         <button id="receiver-capture" type="button">Capture RX snapshot</button>
       </section>
 
-      <section>
-        <label>
-          <input id="receiver-debug-storage" type="checkbox" />
-          Enable debug HELLO ingest from localStorage
-        </label>
-      </section>
-
-      <section>
-        <label for="receiver-decoded-hello-hex">Decoded RX HELLO hex</label>
-        <input id="receiver-decoded-hello-hex" type="text" autocomplete="off" spellcheck="false" />
-        <button id="receiver-process-hello" type="button">Process decoded HELLO</button>
-      </section>
+      ${debugControls}
 
       <section>
         <h2>Diagnostics</h2>
@@ -290,47 +361,54 @@ function mountReceiverShell(root: HTMLElement): void {
   const startBtn = root.querySelector<HTMLButtonElement>('#receiver-start');
   const cancelBtn = root.querySelector<HTMLButtonElement>('#receiver-cancel');
   const captureBtn = root.querySelector<HTMLButtonElement>('#receiver-capture');
-  const processHelloBtn = root.querySelector<HTMLButtonElement>('#receiver-process-hello');
-  const decodedHelloInput = root.querySelector<HTMLInputElement>('#receiver-decoded-hello-hex');
   const debugStorageInput = root.querySelector<HTMLInputElement>('#receiver-debug-storage');
+  const debugHelloInput = root.querySelector<HTMLInputElement>('#receiver-debug-hello-hex');
+  const debugHelloProcessBtn = root.querySelector<HTMLButtonElement>('#receiver-debug-hello-process');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn || !processHelloBtn || !decodedHelloInput || !debugStorageInput) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn) {
     throw new Error('Missing receiver shell elements');
   }
 
+  window.addEventListener(RECEIVER_DECODED_RX_EVENT, (event: Event) => {
+    if (!(event instanceof CustomEvent)) return;
+    handleDecodedRxEvent(diagEl, event.detail as DecodedRxFrameEventDetail);
+  });
+
   startBtn.addEventListener('click', () => {
-    void startReceiver(stateEl, diagEl, () => debugStorageInput.checked);
+    void startReceiver(stateEl, diagEl, () => debugStorageInput?.checked === true);
   });
 
   cancelBtn.addEventListener('click', () => {
     stopReceiverRuntime();
+    resetReceiverSessionState();
     stateEl.textContent = 'cancelled';
-    renderDiagnostics(diagEl, { message: 'Receiver cancelled by user.' });
+    renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Receiver cancelled by user.' });
   });
 
   captureBtn.addEventListener('click', () => {
     captureRxSnapshot(diagEl);
   });
 
-  processHelloBtn.addEventListener('click', () => {
-    const helloHex = decodedHelloInput.value.trim();
-    if (!helloHex) {
-      handshakeDiagnostics.lastFailureReason = 'Enter a decoded HELLO hex frame before processing.';
-      renderDiagnostics(diagEl, { handshake: handshakeDiagnostics });
-      return;
-    }
-    processHelloHex(diagEl, helloHex, debugStorageInput.checked);
-  });
+  if (SHOW_DEBUG_CONTROLS && debugStorageInput) {
+    debugStorageInput.addEventListener('change', () => {
+      if (!debugStorageInput.checked) return;
+      maybeProcessDebugHello(diagEl);
+    });
+  }
 
-  debugStorageInput.addEventListener('change', () => {
-    if (!debugStorageInput.checked) {
-      return;
-    }
-    maybeProcessDebugHello(diagEl);
-  });
+  if (SHOW_DEBUG_CONTROLS && debugHelloInput && debugHelloProcessBtn) {
+    debugHelloProcessBtn.addEventListener('click', () => {
+      const helloHex = debugHelloInput.value.trim();
+      if (!helloHex) {
+        renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Enter HELLO hex for debug processing.' });
+        return;
+      }
+      processHelloHex(diagEl, helloHex, true);
+    });
+  }
 }
 
 const root = document.querySelector<HTMLElement>('#app');
-if (!root) throw new Error('Missing #app root');
-
-mountReceiverShell(root);
+if (root) {
+  mountReceiverShell(root);
+}

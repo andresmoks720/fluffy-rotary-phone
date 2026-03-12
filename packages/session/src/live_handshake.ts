@@ -52,7 +52,7 @@ function toReason(code: number): string {
 }
 
 export class LiveSenderHandshake {
-  private readonly controller = new SenderController();
+  private controller = new SenderController();
   private result: HandshakeDiagnostics['result'] = 'pending';
   private reason: string | null = null;
 
@@ -111,10 +111,17 @@ export class LiveSenderHandshake {
       reason: this.reason
     };
   }
+
+  reset(): HandshakeDiagnostics {
+    this.controller = new SenderController();
+    this.result = 'pending';
+    this.reason = null;
+    return this.diagnostics();
+  }
 }
 
 export class LiveReceiverHandshake {
-  private readonly controller = new ReceiverController();
+  private controller = new ReceiverController();
   private readonly options: ReceiverHandshakeOptions;
   private lockedSessionId: number | null = null;
   private result: HandshakeDiagnostics['result'] = 'pending';
@@ -176,12 +183,25 @@ export class LiveReceiverHandshake {
     };
   }
 
+  reset(): HandshakeDiagnostics {
+    this.controller = new ReceiverController();
+    this.lockedSessionId = null;
+    this.result = 'pending';
+    this.reason = null;
+    return this.diagnostics();
+  }
+
   private validateHello(hello: HelloFrame): { acceptCode: number } {
     if (this.lockedSessionId !== null && hello.sessionId !== this.lockedSessionId) {
       return { acceptCode: HELLO_REJECT_CODES.BUSY };
     }
     if (!this.options.supportedProfiles.includes(hello.profileId)) {
       return { acceptCode: HELLO_REJECT_CODES.UNSUPPORTED_PROFILE };
+    }
+
+    const profileDefaults = PROFILE_DEFAULTS[hello.profileId as keyof typeof PROFILE_DEFAULTS];
+    if (!profileDefaults) {
+      return { acceptCode: HELLO_REJECT_CODES.INVALID_METADATA };
     }
 
     const fileSize = Number(hello.fileSizeBytes);
@@ -201,6 +221,13 @@ export class LiveReceiverHandshake {
 
     const computedFrames = Math.ceil(fileSize / hello.payloadBytesPerFrame);
     if (computedFrames !== hello.totalDataFrames) {
+      return { acceptCode: HELLO_REJECT_CODES.INVALID_METADATA };
+    }
+
+    if (
+      hello.payloadBytesPerFrame !== profileDefaults.payloadBytesPerFrame
+      || hello.framesPerBurst !== profileDefaults.framesPerBurst
+    ) {
       return { acceptCode: HELLO_REJECT_CODES.INVALID_METADATA };
     }
 
