@@ -86,4 +86,70 @@ describe('live handshake integration', () => {
     expect(senderDiag.result).toBe('rejected');
     expect(senderDiag.reason).toContain('unsupported profile');
   });
+
+
+  it('rejects HELLO deterministically for oversize file and accepts exact 10 MiB boundary', () => {
+    const sender = new LiveSenderHandshake();
+    const receiver = new LiveReceiverHandshake({ supportedProfiles: [PROFILE_IDS.SAFE] });
+
+    const boundaryHello = sender.emitHello({
+      sessionId: 0x20000011,
+      fileNameUtf8: asUtf8('boundary.bin'),
+      fileSizeBytes: BigInt(MVP_MAX_FILE_SIZE_BYTES),
+      fileCrc32c: 0x11111111,
+      profileId: PROFILE_IDS.SAFE
+    });
+
+    const boundaryResult = receiver.handleHello(boundaryHello);
+    const boundaryAck = decodeFrame(boundaryResult.helloAckBytes);
+    if (boundaryAck.frameType !== FRAME_TYPES.HELLO_ACK) {
+      throw new Error('expected HELLO_ACK frame');
+    }
+    expect(boundaryAck.acceptCode).toBe(0x00);
+
+    const sender2 = new LiveSenderHandshake();
+    const oversizeHello = sender2.emitHello({
+      sessionId: 0x20000012,
+      fileNameUtf8: asUtf8('too-big.bin'),
+      fileSizeBytes: BigInt(MVP_MAX_FILE_SIZE_BYTES + 1),
+      fileCrc32c: 0x22222222,
+      profileId: PROFILE_IDS.SAFE
+    });
+
+    const receiverFresh = new LiveReceiverHandshake({ supportedProfiles: [PROFILE_IDS.SAFE] });
+    const oversizeResult = receiverFresh.handleHello(oversizeHello);
+    const oversizeAck = decodeFrame(oversizeResult.helloAckBytes);
+    if (oversizeAck.frameType !== FRAME_TYPES.HELLO_ACK) {
+      throw new Error('expected HELLO_ACK frame');
+    }
+
+    expect(oversizeAck.acceptCode).toBe(HELLO_REJECT_CODES.FILE_TOO_LARGE);
+    expect(oversizeResult.diagnostics.reason).toContain('exceeds MVP max size');
+  });
+
+  it('rejects HELLO deterministically when memory preflight budget is insufficient', () => {
+    const sender = new LiveSenderHandshake();
+    const receiver = new LiveReceiverHandshake({
+      supportedProfiles: [PROFILE_IDS.SAFE],
+      memoryBudgetBytes: 1024
+    });
+
+    const helloBytes = sender.emitHello({
+      sessionId: 0x20000021,
+      fileNameUtf8: asUtf8('mem.bin'),
+      fileSizeBytes: 4096n,
+      fileCrc32c: 0x33333333,
+      profileId: PROFILE_IDS.SAFE
+    });
+
+    const { helloAckBytes, diagnostics } = receiver.handleHello(helloBytes);
+    const ack = decodeFrame(helloAckBytes);
+    if (ack.frameType !== FRAME_TYPES.HELLO_ACK) {
+      throw new Error('expected HELLO_ACK frame');
+    }
+
+    expect(ack.acceptCode).toBe(HELLO_REJECT_CODES.MEMORY_UNAVAILABLE);
+    expect(diagnostics.reason).toContain('memory unavailable');
+  });
+
 });

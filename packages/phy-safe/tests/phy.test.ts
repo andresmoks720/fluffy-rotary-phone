@@ -96,3 +96,148 @@ describe('safe preamble acquisition', () => {
     expect(detectSafePreamble(anti, 0.95)).toBeNull();
   });
 });
+
+
+function lcg(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (1664525 * s + 1013904223) >>> 0;
+    return s / 0x100000000;
+  };
+}
+
+function addAwgn(input: Float32Array, sigma: number, seed: number): Float32Array {
+  const rand = lcg(seed);
+  const out = new Float32Array(input.length);
+  for (let i = 0; i < input.length; i += 2) {
+    const u1 = Math.max(rand(), 1e-12);
+    const u2 = rand();
+    const mag = Math.sqrt(-2 * Math.log(u1));
+    const z0 = mag * Math.cos(2 * Math.PI * u2);
+    const z1 = mag * Math.sin(2 * Math.PI * u2);
+    out[i] = input[i] + sigma * z0;
+    if (i + 1 < input.length) {
+      out[i + 1] = input[i + 1] + sigma * z1;
+    }
+  }
+  return out;
+}
+
+function bitErrorRate(a: Uint8Array, b: Uint8Array): number {
+  let errors = 0;
+  let total = a.length * 8;
+  for (let i = 0; i < a.length; i += 1) {
+    let x = a[i] ^ b[i];
+    while (x > 0) {
+      errors += x & 1;
+      x >>= 1;
+    }
+  }
+  return total === 0 ? 0 : errors / total;
+}
+
+describe('safe PHY deterministic vectors and acquisition boundaries', () => {
+  it('locks deterministic aggregate vectors for preamble and training', () => {
+    const preamble = generateSafePreamble();
+    const training = generateSafeTrainingBlock();
+
+    const preambleSum = Array.from(preamble).reduce((acc, v) => acc + v, 0);
+    const trainingSum = Array.from(training).reduce((acc, v) => acc + v, 0);
+    const preambleEnergy = Array.from(preamble).reduce((acc, v) => acc + v * v, 0);
+    const trainingEnergy = Array.from(training).reduce((acc, v) => acc + v * v, 0);
+
+    expect(preambleSum).toBe(-2);
+    expect(trainingSum).toBe(0);
+    expect(preambleEnergy).toBe(preamble.length);
+    expect(trainingEnergy).toBe(training.length);
+  });
+
+  it('keeps preamble and training amplitudes in strict BPSK bounds', () => {
+    const preamble = generateSafePreamble();
+    const training = generateSafeTrainingBlock();
+
+    for (const v of preamble) {
+      expect(v).toBeGreaterThanOrEqual(-1);
+      expect(v).toBeLessThanOrEqual(1);
+    }
+    for (const v of training) {
+      expect(v).toBeGreaterThanOrEqual(-1);
+      expect(v).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('detects expected offset under low noise', () => {
+    const preamble = generateSafePreamble();
+    const offset = 37;
+    const stream = new Float32Array(offset + preamble.length + 11);
+    stream.set(addAwgn(preamble, 0.03, 0x1234), offset);
+
+    const found = detectSafePreamble(stream, 0.9);
+    expect(found).not.toBeNull();
+    expect(found?.index).toBeGreaterThanOrEqual(0);
+    expect(found?.index).toBeLessThanOrEqual(offset);
+    expect(found?.score).toBeGreaterThan(0.9);
+  });
+
+  it('rejects pure noise without false positive lock', () => {
+    const preamble = generateSafePreamble();
+    const noise = new Float32Array(preamble.length * 2);
+    const rand = lcg(0xbeef);
+    for (let i = 0; i < noise.length; i += 1) {
+      noise[i] = (rand() - 0.5) * 0.25;
+    }
+
+    expect(detectSafePreamble(noise, 0.9)).toBeNull();
+  });
+
+  it('pins threshold boundary behavior just below and above perfect correlation', () => {
+    const preamble = generateSafePreamble();
+    expect(detectSafePreamble(preamble, 0.9999)).toEqual({ index: 0, score: 1 });
+    expect(() => detectSafePreamble(preamble, 1.000001)).toThrow(/Threshold must be a finite number/);
+  });
+
+  it('rejects invalid detector thresholds loudly', () => {
+    const preamble = generateSafePreamble();
+    expect(() => detectSafePreamble(preamble, 0)).toThrow(/Threshold must be a finite number/);
+    expect(() => detectSafePreamble(preamble, -0.1)).toThrow(/Threshold must be a finite number/);
+    expect(() => detectSafePreamble(preamble, 1.1)).toThrow(/Threshold must be a finite number/);
+  });
+});
+
+describe('safe PHY BER and bit-order guarantees', () => {
+  it('preserves exact bit ordering for known pattern payload', () => {
+    const payload = Uint8Array.from([0b10000001, 0b01111110]);
+    const symbols = modulateSafeBpsk(payload);
+    expect(Array.from(symbols.slice(0, 8))).toEqual([1, -1, -1, -1, -1, -1, -1, 1]);
+    expect(Array.from(symbols.slice(8, 16))).toEqual([-1, 1, 1, 1, 1, 1, 1, -1]);
+    expect(demodulateSafeBpsk(symbols)).toEqual(payload);
+  });
+
+  it('enforces non-byte-aligned symbol rejection explicitly', () => {
+    const payload = Uint8Array.from([0xaa]);
+    const symbols = modulateSafeBpsk(payload);
+    expect(() => demodulateSafeBpsk(symbols.slice(0, 7))).toThrow(/divisible by 8/);
+  });
+
+  it('keeps BER within deterministic envelope per noise bucket', () => {
+    const rand = lcg(0x51a7);
+    const payload = new Uint8Array(512);
+    for (let i = 0; i < payload.length; i += 1) {
+      payload[i] = Math.floor(rand() * 256);
+    }
+
+    const symbols = modulateSafeBpsk(payload);
+    const lowNoise = addAwgn(symbols, 0.05, 0x1001);
+    const medNoise = addAwgn(symbols, 0.6, 0x1002);
+
+    const decodedLow = demodulateSafeBpsk(lowNoise);
+    const decodedMed = demodulateSafeBpsk(medNoise);
+
+    const lowBer = bitErrorRate(payload, decodedLow);
+    const medBer = bitErrorRate(payload, decodedMed);
+
+    expect(lowBer).toBeLessThanOrEqual(0.001);
+    expect(medBer).toBeGreaterThanOrEqual(0.001);
+    expect(medBer).toBeLessThanOrEqual(0.2);
+  });
+});
