@@ -35,6 +35,9 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 - [x] Implement TX test tone generator.
 - [x] Implement RX raw sample capture.
 - [x] Add waveform debug buffer.
+- [x] Add developer single-frame TX harness action.
+- [x] Add developer single-frame RX decode harness action.
+- [x] Add frame decode success/CRC failure diagnostics counters.
 
 ## Notes
 
