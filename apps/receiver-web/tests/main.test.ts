@@ -99,9 +99,49 @@ describe('receiver web shell', () => {
       }
     }));
 
+    const dataHex = Array.from(encodeFrame({
+      version: PROTOCOL_VERSION,
+      frameType: FRAME_TYPES.DATA,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x10000001,
+      burstId: 0,
+      slotIndex: 0,
+      payloadFileOffset: 0,
+      payload: new Uint8Array([1, 2, 3, 4])
+    })).map((v) => v.toString(16).padStart(2, '0')).join('');
+
+    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-decoded-rx-frame', {
+      detail: {
+        frameHex: dataHex,
+        frameType: 'DATA',
+        classification: 'ok'
+      }
+    }));
+
+    const endHex = Array.from(encodeFrame({
+      version: PROTOCOL_VERSION,
+      frameType: FRAME_TYPES.END,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x10000001,
+      fileSizeBytes: 1024n,
+      totalDataFrames: 2,
+      fileCrc32c: 0x12345678
+    })).map((v) => v.toString(16).padStart(2, '0')).join('');
+
+    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-decoded-rx-frame', {
+      detail: {
+        frameHex: endHex,
+        frameType: 'END',
+        classification: 'ok'
+      }
+    }));
+
     const diag = document.querySelector('#receiver-diag')?.textContent ?? '';
     expect(diag).toContain('"handshakeResult": "accepted"');
     expect(diag).toContain('"processedHelloCount": 1');
+    expect(diag).toContain('"lastFinalResponseHex"');
 
     document.querySelector<HTMLButtonElement>('#receiver-cancel')?.click();
     expect(document.querySelector('#receiver-state')?.textContent).toBe('cancelled');

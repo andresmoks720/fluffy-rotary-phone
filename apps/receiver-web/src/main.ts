@@ -13,11 +13,14 @@ import {
   type AudioGraphRuntime,
   type WaveformDebugEntry
 } from '../../../packages/audio-browser/src/index.js';
+import { FRAME_TYPES } from '../../../packages/contract/src/index.js';
+import { decodeFrame } from '../../../packages/protocol/src/index.js';
 import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
   decodeLiveFrameHex,
   LiveReceiverHandshake,
+  LiveReceiverTransfer,
   type LiveDiagnosticsModel
 } from '../../../packages/session/src/index.js';
 
@@ -39,6 +42,8 @@ interface DecodedRxFrameEventDetail {
 
 interface ReceiverHandshakeDiagnostics {
   transfer: LiveDiagnosticsModel;
+  transferBytesSaved: number;
+  invalidTurnEvents: number;
   sessionId: number | null;
   currentTurnOwner: 'sender' | 'receiver';
   handshakeResult: 'pending' | 'accepted' | 'rejected';
@@ -54,6 +59,8 @@ const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame
 
 let receiverRuntime: ReceiverRuntime | null = null;
 const receiverHandshake = new LiveReceiverHandshake();
+let receiverTransfer: LiveReceiverTransfer | null = null;
+let lastFinalResponseHex: string | null = null;
 let lastSeenHelloHex: string | null = null;
 let lastCapture: {
   readonly samples: readonly number[];
@@ -67,7 +74,9 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   handshakeResult: 'pending',
   handshakeReason: null,
   processedHelloCount: 0,
-  lastFailureReason: null
+  lastFailureReason: null,
+  transferBytesSaved: 0,
+  invalidTurnEvents: 0
 };
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
@@ -171,6 +180,10 @@ function resetReceiverSessionState(): void {
   handshakeDiagnostics.handshakeReason = null;
   handshakeDiagnostics.processedHelloCount = 0;
   handshakeDiagnostics.lastFailureReason = null;
+  handshakeDiagnostics.transferBytesSaved = 0;
+  handshakeDiagnostics.invalidTurnEvents = 0;
+  receiverTransfer = null;
+  lastFinalResponseHex = null;
 }
 
 function captureRxSnapshot(diagEl: HTMLElement): void {
@@ -198,10 +211,22 @@ function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToS
   }
 
   try {
-    const { helloAckBytes } = receiverHandshake.handleHello(decodeLiveFrameHex(helloHex));
+    const helloBytes = decodeLiveFrameHex(helloHex);
+    const decodedHello = decodeFrame(helloBytes, { expectedTurnOwner: 'sender' });
+    const { helloAckBytes } = receiverHandshake.handleHello(helloBytes);
     handshakeDiagnostics.transfer.counters.framesRx += 1;
     handshakeDiagnostics.processedHelloCount += 1;
     updateHandshakeDiagnostics();
+    if (handshakeDiagnostics.handshakeResult === 'accepted' && decodedHello.frameType === FRAME_TYPES.HELLO) {
+      receiverTransfer = new LiveReceiverTransfer({
+        sessionId: decodedHello.sessionId,
+        profileId: decodedHello.profileId,
+        fileSizeBytes: Number(decodedHello.fileSizeBytes),
+        fileCrc32c: decodedHello.fileCrc32c,
+        totalDataFrames: decodedHello.totalDataFrames
+      });
+      handshakeDiagnostics.transfer.state = 'WAIT_DATA';
+    }
     const ackHex = toHex(helloAckBytes);
     if (writeDebugAckToStorage) {
       window.localStorage.setItem(LIVE_HELLO_ACK_STORAGE_KEY, ackHex);
@@ -229,11 +254,67 @@ function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToS
   }
 }
 
-function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
-  if (detail.frameType && detail.frameType !== 'HELLO') {
-    handshakeDiagnostics.transfer.counters.decodeFailures += 1;
+
+function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
+  if (!receiverTransfer || !receiverRuntime) return;
+  if (detail.classification && detail.classification !== 'ok') {
+    applyDecodeClassification(detail.classification);
+    return;
+  }
+
+  try {
+    const frameBytes = decodeLiveFrameHex(detail.frameHex);
+    if (detail.frameType === 'DATA') {
+      receiverTransfer.onData(frameBytes);
+      handshakeDiagnostics.transfer.counters.framesRx += 1;
+      handshakeDiagnostics.transfer.counters.burstsRx += 1;
+      const ack = receiverTransfer.emitBurstAck();
+      playFrameOverTxPath(receiverRuntime, ack);
+      handshakeDiagnostics.transfer.counters.framesTx += 1;
+      handshakeDiagnostics.transfer.state = 'WAIT_DATA';
+      renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Receiver processed DATA and transmitted BURST_ACK.' });
+      return;
+    }
+
+    if (detail.frameType === 'END') {
+      const final = receiverTransfer.onEnd(frameBytes);
+      playFrameOverTxPath(receiverRuntime, final);
+      handshakeDiagnostics.transfer.counters.framesRx += 1;
+      handshakeDiagnostics.transfer.counters.framesTx += 1;
+      lastFinalResponseHex = toHex(final);
+      const saved = receiverTransfer.savedFileBytes();
+      handshakeDiagnostics.transferBytesSaved = saved?.byteLength ?? 0;
+      handshakeDiagnostics.transfer.state = saved ? 'SUCCEEDED' : 'FAILED';
+      renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, lastFinalResponseHex, message: 'Receiver processed END and transmitted FINAL response.' });
+      return;
+    }
+
+    handshakeDiagnostics.invalidTurnEvents += 1;
+    handshakeDiagnostics.transfer.failure.category = 'protocol_error';
+    handshakeDiagnostics.transfer.failure.reason = `unexpected receiver transfer frame type: ${detail.frameType ?? 'unknown'}`;
+  } catch (error) {
     handshakeDiagnostics.transfer.failure.category = 'decode_error';
-    handshakeDiagnostics.transfer.failure.reason = `unexpected decoded frame type for receiver handshake: ${detail.frameType}`;
+    handshakeDiagnostics.transfer.failure.reason = String(error);
+    handshakeDiagnostics.transfer.counters.decodeFailures += 1;
+  }
+
+  renderDiagnostics(diagEl, { handshake: handshakeDiagnostics });
+}
+
+function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
+  if (detail.frameType === 'HELLO') {
+    processHelloHex(diagEl, detail.frameHex, false, detail.classification ?? 'ok');
+    return;
+  }
+  if (detail.frameType === 'DATA' || detail.frameType === 'END') {
+    processReceiverTransferFrame(diagEl, detail);
+    return;
+  }
+  if (detail.frameType) {
+    handshakeDiagnostics.transfer.counters.decodeFailures += 1;
+    handshakeDiagnostics.invalidTurnEvents += 1;
+    handshakeDiagnostics.transfer.failure.category = 'decode_error';
+    handshakeDiagnostics.transfer.failure.reason = `unexpected decoded frame type for receiver shell: ${detail.frameType}`;
     renderDiagnostics(diagEl, { handshake: handshakeDiagnostics });
     return;
   }
@@ -301,6 +382,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
           recent: waveformDebugBuffer
         },
         handshake: handshakeDiagnostics,
+        lastFinalResponseHex,
         message: 'Receiver listening shell initialized; awaiting decoded RX events.'
       });
       if (SHOW_DEBUG_CONTROLS && isDebugStorageEnabled()) {
@@ -340,6 +422,7 @@ export function mountReceiverShell(root: HTMLElement): void {
       <h1>Audio Modem Receiver</h1>
       <p>State: <strong id="receiver-state">idle</strong></p>
       <p>Decoded RX source: custom event <code>${RECEIVER_DECODED_RX_EVENT}</code></p>
+      <p>Transfer RX frames accepted after handshake: <code>DATA</code>, <code>END</code></p>
 
       <section>
         <button id="receiver-start" type="button">Start</button>

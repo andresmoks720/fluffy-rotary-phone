@@ -9,13 +9,15 @@ import {
   type AudioLevelSummary,
   type AudioGraphRuntime
 } from '../../../packages/audio-browser/src/index.js';
-import { PROFILE_IDS, TIMEOUTS_MS } from '../../../packages/contract/src/index.js';
+import { FRAME_TYPES, PROFILE_IDS, TIMEOUTS_MS } from '../../../packages/contract/src/index.js';
 import { crc32c } from '../../../packages/crc/src/index.js';
+import { decodeFrame } from '../../../packages/protocol/src/index.js';
 import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
   decodeLiveFrameHex,
   LiveSenderHandshake,
+  LiveSenderTransfer,
   type LiveDiagnosticsModel
 } from '../../../packages/session/src/index.js';
 
@@ -44,6 +46,8 @@ interface SenderHarnessDiagnostics {
   currentTurnOwner: 'sender' | 'receiver';
   handshakeResult: 'pending' | 'accepted' | 'rejected';
   handshakeReason: string | null;
+  transferBytesConfirmed: number;
+  invalidTurnEvents: number;
 }
 
 const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('debug') === '1';
@@ -52,8 +56,11 @@ const SENDER_DECODED_RX_EVENT = 'fluffy-rotary-phone:sender-decoded-rx-frame';
 
 let senderRuntime: SenderRuntime | null = null;
 const senderHandshake = new LiveSenderHandshake();
+let senderTransfer: LiveSenderTransfer | null = null;
 let lastSeenAckHex: string | null = null;
 let helloAckDeadlineMs: number | null = null;
+let burstAckDeadlineMs: number | null = null;
+let finalDeadlineMs: number | null = null;
 const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   transfer: createInitialLiveDiagnostics({ state: 'IDLE', currentTurnOwner: 'sender' }),
   frameTransmitAttempts: 0,
@@ -62,7 +69,9 @@ const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   handshakeSessionId: null,
   currentTurnOwner: 'sender',
   handshakeResult: 'pending',
-  handshakeReason: null
+  handshakeReason: null,
+  transferBytesConfirmed: 0,
+  invalidTurnEvents: 0
 };
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
@@ -97,6 +106,9 @@ function resetSenderSessionState(): void {
   senderHandshake.reset();
   lastSeenAckHex = null;
   helloAckDeadlineMs = null;
+  burstAckDeadlineMs = null;
+  finalDeadlineMs = null;
+  senderTransfer = null;
   senderHarnessDiagnostics.transfer = createInitialLiveDiagnostics({ state: 'IDLE', currentTurnOwner: 'sender' });
   senderHarnessDiagnostics.frameTransmitAttempts = 0;
   senderHarnessDiagnostics.lastFailureReason = null;
@@ -105,6 +117,8 @@ function resetSenderSessionState(): void {
   senderHarnessDiagnostics.currentTurnOwner = 'sender';
   senderHarnessDiagnostics.handshakeResult = 'pending';
   senderHarnessDiagnostics.handshakeReason = null;
+  senderHarnessDiagnostics.transferBytesConfirmed = 0;
+  senderHarnessDiagnostics.invalidTurnEvents = 0;
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -182,6 +196,14 @@ function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): vo
   source.start();
 }
 
+function transmitFrames(frames: readonly Uint8Array[]): void {
+  if (!senderRuntime || frames.length === 0) return;
+  for (const frame of frames) {
+    playFrameOverTxPath(senderRuntime, frame);
+  }
+  senderHarnessDiagnostics.transfer.counters.framesTx += frames.length;
+}
+
 async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): Promise<void> {
   senderHarnessDiagnostics.frameTransmitAttempts += 1;
   if (!senderRuntime) {
@@ -205,7 +227,7 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const profileId = readSelectedProfileId(root);
+    const profileId = readSelectedProfileId(document.body);
     const sessionId = window.crypto.getRandomValues(new Uint32Array(1))[0] ?? 1;
     const helloBytes = senderHandshake.emitHello({
       sessionId,
@@ -220,6 +242,9 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     senderHarnessDiagnostics.lastFailureReason = null;
     senderHarnessDiagnostics.lastTransmittedFrameHex = toHex(helloBytes);
     helloAckDeadlineMs = Date.now() + TIMEOUTS_MS.HELLO_ACK;
+    burstAckDeadlineMs = null;
+    finalDeadlineMs = null;
+    senderTransfer = null;
     lastSeenAckHex = null;
 
     updateHandshakeDiagnostics();
@@ -250,6 +275,24 @@ function processHelloAckHex(diagEl: HTMLElement, helloAckHex: string, classifica
     senderHarnessDiagnostics.transfer.counters.framesRx += 1;
     lastSeenAckHex = helloAckHex;
     updateHandshakeDiagnostics();
+    if (senderHarnessDiagnostics.handshakeResult === 'accepted' && senderHarnessDiagnostics.handshakeSessionId !== null) {
+      const fileInput = document.querySelector<HTMLInputElement>('#sender-file');
+      const file = fileInput?.files?.[0];
+      if (file) {
+        void file.arrayBuffer().then((buffer) => {
+          senderTransfer = new LiveSenderTransfer({
+            sessionId: senderHarnessDiagnostics.handshakeSessionId ?? 0,
+            profileId: readSelectedProfileId(document.body),
+            fileBytes: new Uint8Array(buffer)
+          });
+          const step = senderTransfer.initialBurstFrames();
+          senderHarnessDiagnostics.transfer.state = 'SEND_BURST';
+          senderHarnessDiagnostics.transfer.counters.burstsTx += 1;
+          transmitFrames(step.txFrames);
+          burstAckDeadlineMs = Date.now() + TIMEOUTS_MS.BURST_ACK;
+        });
+      }
+    }
     renderDiagnostics(diagEl, {
       harness: senderHarnessDiagnostics,
       message: senderHarnessDiagnostics.handshakeResult === 'accepted'
@@ -265,6 +308,56 @@ function processHelloAckHex(diagEl: HTMLElement, helloAckHex: string, classifica
   }
 }
 
+function processSenderTransferFrame(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
+  if (!senderTransfer) return;
+  if (detail.frameType !== 'BURST_ACK' && detail.frameType !== 'FINAL_OK' && detail.frameType !== 'FINAL_BAD') {
+    senderHarnessDiagnostics.invalidTurnEvents += 1;
+    senderHarnessDiagnostics.transfer.failure.category = 'protocol_error';
+    senderHarnessDiagnostics.transfer.failure.reason = `unexpected sender transfer frame type: ${detail.frameType ?? 'unknown'}`;
+    renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
+    return;
+  }
+
+  const frameBytes = decodeLiveFrameHex(detail.frameHex);
+  senderHarnessDiagnostics.transfer.counters.framesRx += 1;
+  if (detail.frameType === 'BURST_ACK') {
+    burstAckDeadlineMs = null;
+    const result = senderTransfer.onBurstAck(frameBytes);
+    transmitFrames(result.txFrames);
+    if (result.txFrames.length > 0 && !result.failed) {
+      const firstTx = decodeFrame(result.txFrames[0] ?? new Uint8Array(), { expectedSessionId: senderHarnessDiagnostics.handshakeSessionId ?? undefined });
+      if (firstTx.frameType === FRAME_TYPES.END) {
+        finalDeadlineMs = Date.now() + TIMEOUTS_MS.FINAL_RESULT;
+        senderHarnessDiagnostics.transfer.state = 'WAIT_FINAL';
+      } else {
+        senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
+        senderHarnessDiagnostics.transfer.counters.burstsTx += 1;
+        burstAckDeadlineMs = Date.now() + TIMEOUTS_MS.BURST_ACK;
+        senderHarnessDiagnostics.transfer.state = 'WAIT_BURST_ACK';
+      }
+    }
+    return;
+  }
+
+  finalDeadlineMs = null;
+  const finalResult = senderTransfer.onFinal(frameBytes);
+  if (finalResult.done) {
+    senderHarnessDiagnostics.transfer.state = 'SUCCEEDED';
+    senderHarnessDiagnostics.currentTurnOwner = 'sender';
+    senderHarnessDiagnostics.transferBytesConfirmed = (document.querySelector<HTMLInputElement>('#sender-file')?.files?.[0]?.size ?? 0);
+    senderHarnessDiagnostics.transfer.effectiveGoodputBps = senderHarnessDiagnostics.transfer.elapsedMs > 0
+      ? Math.floor((senderHarnessDiagnostics.transferBytesConfirmed * 8 * 1000) / senderHarnessDiagnostics.transfer.elapsedMs)
+      : 0;
+    renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics, message: 'Sender transfer completed with FINAL_OK.' });
+    return;
+  }
+
+  senderHarnessDiagnostics.transfer.state = 'FAILED';
+  senderHarnessDiagnostics.transfer.failure.category = 'protocol_error';
+  senderHarnessDiagnostics.transfer.failure.reason = 'Sender transfer failed with FINAL_BAD or invalid final frame.';
+  renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
+}
+
 function maybeConsumeDebugHelloAck(diagEl: HTMLElement): void {
   const helloAckHex = window.localStorage.getItem(LIVE_HELLO_ACK_STORAGE_KEY);
   if (!helloAckHex) return;
@@ -272,10 +365,19 @@ function maybeConsumeDebugHelloAck(diagEl: HTMLElement): void {
 }
 
 function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
-  if (detail.frameType && detail.frameType !== 'HELLO_ACK') {
+  if (detail.frameType === 'HELLO_ACK') {
+    processHelloAckHex(diagEl, detail.frameHex, detail.classification ?? 'ok');
+    return;
+  }
+  if (detail.frameType === 'BURST_ACK' || detail.frameType === 'FINAL_OK' || detail.frameType === 'FINAL_BAD') {
+    processSenderTransferFrame(diagEl, detail);
+    return;
+  }
+  if (detail.frameType) {
     senderHarnessDiagnostics.transfer.counters.decodeFailures += 1;
+    senderHarnessDiagnostics.invalidTurnEvents += 1;
     senderHarnessDiagnostics.transfer.failure.category = 'decode_error';
-    senderHarnessDiagnostics.transfer.failure.reason = `unexpected decoded frame type for sender handshake: ${detail.frameType}`;
+    senderHarnessDiagnostics.transfer.failure.reason = `unexpected decoded frame type for sender shell: ${detail.frameType}`;
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
@@ -322,6 +424,20 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
         senderHarnessDiagnostics.transfer.failure.category = 'timeout';
         senderHarnessDiagnostics.transfer.failure.reason = 'HELLO_ACK timeout in live sender shell';
         helloAckDeadlineMs = Date.now() + TIMEOUTS_MS.HELLO_ACK;
+      }
+      if (burstAckDeadlineMs !== null && Date.now() >= burstAckDeadlineMs && senderTransfer) {
+        senderHarnessDiagnostics.transfer.counters.timeoutsBurstAck += 1;
+        senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
+        senderHarnessDiagnostics.transfer.failure.category = 'timeout';
+        senderHarnessDiagnostics.transfer.failure.reason = 'BURST_ACK timeout in live sender shell';
+        senderHarnessDiagnostics.transfer.state = 'FAILED';
+        burstAckDeadlineMs = null;
+      }
+      if (finalDeadlineMs !== null && Date.now() >= finalDeadlineMs && senderTransfer) {
+        senderHarnessDiagnostics.transfer.counters.timeoutsFinal += 1;
+        const retry = senderTransfer.onFinalTimeout();
+        transmitFrames(retry.txFrames);
+        finalDeadlineMs = Date.now() + TIMEOUTS_MS.FINAL_RESULT;
       }
       updateHandshakeDiagnostics();
       renderDiagnostics(diagEl, {
@@ -378,6 +494,7 @@ export function mountSenderShell(root: HTMLElement): void {
       <h1>Audio Modem Sender</h1>
       <p>State: <strong id="sender-state">idle</strong></p>
       <p>Decoded RX source: custom event <code>${SENDER_DECODED_RX_EVENT}</code></p>
+      <p>Transfer RX frames accepted after handshake: <code>BURST_ACK</code>, <code>FINAL_OK</code>, <code>FINAL_BAD</code></p>
 
       <section>
         <label for="sender-file">Select file</label>

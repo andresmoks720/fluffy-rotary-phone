@@ -44,13 +44,18 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 - [x] Add deterministic receiver BURST_ACK bitmap generation and duplicate DATA slot handling.
 - [x] Add END/FINAL_OK/FINAL_BAD completion path with END retry + retry exhaustion cancellation.
 - [x] Add receiver save-after-success-only file exposure semantics in transport harness (`savedFileBytes()`).
-- [ ] Wire browser shells to these transport primitives from decoded live RX frames.
+- [x] Wire browser shells to transport primitives from decoded RX frames (`LiveSenderTransfer`/`LiveReceiverTransfer`) for DATA/BURST_ACK/END/FINAL flow in browser integration tests.
 
 ### T7 progress
 - [x] Add repeated 10 MiB simulated-transfer acceptance tests (3 runs) in automated suite.
-- [ ] Capture repeated direct-cable browser acceptance evidence in `docs/run_log.md` once live RX decode path is fully wired.
+- [ ] Capture repeated direct-cable browser acceptance evidence in `docs/run_log.md` (small + 10 MiB runs) after full cable setup runs.
 
 ## Notes
 
 - Protocol source of truth remains `docs/mvp.md`.
 - Do not change wire semantics without updating `docs/mvp.md` in the same patch.
+
+
+### T2 stability procedure
+- [x] Define scripted soak-run procedure (`docs/soak_test_procedure.md`) with explicit pass/fail thresholds and diagnostics sampling cadence.
+- [ ] Execute 10+ minute idle soak and record evidence in `docs/run_log.md`.
