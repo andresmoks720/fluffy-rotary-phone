@@ -21,6 +21,8 @@ importers:
 
   packages/crc: {}
 
+  packages/phy-safe: {}
+
   packages/protocol:
     dependencies:
       '@audio-modem/contract':
