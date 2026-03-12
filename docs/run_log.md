@@ -40,3 +40,11 @@ Chronological implementation and validation notes.
 
 - Added receiver RX raw sample capture control and diagnostics preview (sample window + level summary) for waveform bring-up checks.
 - Added receiver waveform debug buffer diagnostics with capped history (recent meter entries) to support live PHY bring-up inspection.
+
+- Added `packages/session/src/live_transfer.ts` for deterministic transport-loop primitives: sender DATA burst scheduling, ACK-driven selective retransmit, END retry policy, FINAL handling, and on-wire CANCEL on retry exhaustion.
+- Added receiver-side transfer assembly with absolute payload offsets, duplicate-frame suppression, END metadata validation, whole-file CRC verification, and save-after-success-only gating (`savedFileBytes()`).
+- Added `packages/session/tests/live_transfer_integration.test.ts` covering:
+  - full DATA -> BURST_ACK -> END -> FINAL_OK flow,
+  - repeated 10 MiB simulated transfers (3 runs),
+  - final-timeout retry exhaustion emitting CANCEL.
+- Installed missing workspace test dependency (`jsdom`) and re-ran full workspace tests.

@@ -36,6 +36,20 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 - [ ] Diagnostics show session/turn + timeout/retry/error counters during live tests.
 - [x] Add deterministic acceptance evidence template (`docs/acceptance_evidence_template.md`).
 
+
+## Active focus: T5/T6/T7 — live transport completion
+
+### T5/T6 progress
+- [x] Add deterministic sender DATA burst scheduler + selective retransmit logic in session package transport harness.
+- [x] Add deterministic receiver BURST_ACK bitmap generation and duplicate DATA slot handling.
+- [x] Add END/FINAL_OK/FINAL_BAD completion path with END retry + retry exhaustion cancellation.
+- [x] Add receiver save-after-success-only file exposure semantics in transport harness (`savedFileBytes()`).
+- [ ] Wire browser shells to these transport primitives from decoded live RX frames.
+
+### T7 progress
+- [x] Add repeated 10 MiB simulated-transfer acceptance tests (3 runs) in automated suite.
+- [ ] Capture repeated direct-cable browser acceptance evidence in `docs/run_log.md` once live RX decode path is fully wired.
+
 ## Notes
 
 - Protocol source of truth remains `docs/mvp.md`.
