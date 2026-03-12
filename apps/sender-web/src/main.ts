@@ -564,17 +564,22 @@ export function mountSenderShell(root: HTMLElement): void {
   });
 
   toneBtn.addEventListener('click', () => {
-    if (!senderRuntime) {
-      renderDiagnostics(diagEl, { error: 'Start sender runtime before toggling tone.' });
-      return;
-    }
+    void (async () => {
+      if (!senderRuntime) {
+        await startSender(root, stateEl, diagEl);
+      }
+      if (!senderRuntime) {
+        renderDiagnostics(diagEl, { error: 'Unable to start sender runtime; cannot toggle tone.' });
+        return;
+      }
 
-    if (senderRuntime.graph.testToneFrequencyHz !== null) {
-      senderRuntime.graph.stopTestTone();
-      return;
-    }
+      if (senderRuntime.graph.testToneFrequencyHz !== null) {
+        senderRuntime.graph.stopTestTone();
+        return;
+      }
 
-    senderRuntime.graph.startTestTone(readTestToneFrequency(root));
+      senderRuntime.graph.startTestTone(readTestToneFrequency(root));
+    })();
   });
 
   sendHelloBtn.addEventListener('click', () => {
