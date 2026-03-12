@@ -48,11 +48,25 @@ interface SenderHarnessDiagnostics {
   handshakeReason: string | null;
   transferBytesConfirmed: number;
   invalidTurnEvents: number;
+  runtimeStartup: {
+    attempts: number;
+    stage: 'idle' | 'request_mic' | 'init_audio_context' | 'register_worklet' | 'create_audio_graph' | 'ready' | 'failed';
+    lastAttemptAtMs: number | null;
+    lastSuccessAtMs: number | null;
+    workletModuleCandidates: readonly string[];
+    workletModuleSelected: string | null;
+    workletModuleErrors: readonly string[];
+    lastError: string | null;
+  };
 }
 
 const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('debug') === '1';
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const SENDER_DECODED_RX_EVENT = 'fluffy-rotary-phone:sender-decoded-rx-frame';
+const SENDER_WORKLET_MODULE_CANDIDATES = [
+  '/meter_processor.js',
+  new URL('meter_processor.js', window.location.href).toString()
+] as const;
 
 let senderRuntime: SenderRuntime | null = null;
 let senderStartInFlight: Promise<void> | null = null;
@@ -73,7 +87,17 @@ const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   handshakeResult: 'pending',
   handshakeReason: null,
   transferBytesConfirmed: 0,
-  invalidTurnEvents: 0
+  invalidTurnEvents: 0,
+  runtimeStartup: {
+    attempts: 0,
+    stage: 'idle',
+    lastAttemptAtMs: null,
+    lastSuccessAtMs: null,
+    workletModuleCandidates: SENDER_WORKLET_MODULE_CANDIDATES,
+    workletModuleSelected: null,
+    workletModuleErrors: [],
+    lastError: null
+  }
 };
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
@@ -121,6 +145,29 @@ function resetSenderSessionState(): void {
   senderHarnessDiagnostics.handshakeReason = null;
   senderHarnessDiagnostics.transferBytesConfirmed = 0;
   senderHarnessDiagnostics.invalidTurnEvents = 0;
+}
+
+function setDiagnosticsFailure(category: LiveDiagnosticsModel['failure']['category'], reason: string): void {
+  senderHarnessDiagnostics.lastFailureReason = reason;
+  senderHarnessDiagnostics.transfer.failure.category = category;
+  senderHarnessDiagnostics.transfer.failure.reason = reason;
+}
+
+async function registerSenderWorklet(ctx: AudioContext): Promise<void> {
+  const errors: string[] = [];
+  for (const moduleUrl of SENDER_WORKLET_MODULE_CANDIDATES) {
+    try {
+      await registerWorklet(ctx, moduleUrl);
+      senderHarnessDiagnostics.runtimeStartup.workletModuleSelected = moduleUrl;
+      senderHarnessDiagnostics.runtimeStartup.workletModuleErrors = errors;
+      return;
+    } catch (error) {
+      errors.push(`${moduleUrl}: ${String(error)}`);
+    }
+  }
+
+  senderHarnessDiagnostics.runtimeStartup.workletModuleErrors = errors;
+  throw new Error(`Unable to register sender worklet. Attempted modules: ${errors.join(' | ')}`);
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -207,9 +254,8 @@ function transmitFrames(frames: readonly Uint8Array[]): void {
 }
 
 async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): Promise<void> {
-  senderHarnessDiagnostics.frameTransmitAttempts += 1;
   if (!senderRuntime) {
-    senderHarnessDiagnostics.lastFailureReason = 'Start sender runtime before transmitting HELLO.';
+    setDiagnosticsFailure('input_validation', 'Start sender runtime before transmitting HELLO.');
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
@@ -217,15 +263,16 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
   const fileInput = root.querySelector<HTMLInputElement>('#sender-file');
   const file = fileInput?.files?.[0];
   if (!file) {
-    senderHarnessDiagnostics.lastFailureReason = 'Select a file before sending HELLO.';
+    setDiagnosticsFailure('input_validation', 'Select a file before sending HELLO.');
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
   if (file.size === 0) {
-    senderHarnessDiagnostics.lastFailureReason = 'Zero-byte files are not supported by the MVP handshake. Select a non-empty file.';
+    setDiagnosticsFailure('input_validation', 'Zero-byte files are not supported by the MVP handshake. Select a non-empty file.');
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
+  senderHarnessDiagnostics.frameTransmitAttempts += 1;
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -242,6 +289,8 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     playFrameOverTxPath(senderRuntime, helloBytes);
     senderHarnessDiagnostics.transfer.counters.framesTx += 1;
     senderHarnessDiagnostics.lastFailureReason = null;
+    senderHarnessDiagnostics.transfer.failure.category = 'none';
+    senderHarnessDiagnostics.transfer.failure.reason = null;
     senderHarnessDiagnostics.lastTransmittedFrameHex = toHex(helloBytes);
     helloAckDeadlineMs = Date.now() + TIMEOUTS_MS.HELLO_ACK;
     burstAckDeadlineMs = null;
@@ -255,7 +304,7 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
       message: `HELLO transmitted over live TX path; waiting for decoder event ${SENDER_DECODED_RX_EVENT}.`
     });
   } catch (error) {
-    senderHarnessDiagnostics.lastFailureReason = String(error);
+    setDiagnosticsFailure('unknown', String(error));
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
   }
 }
@@ -396,15 +445,24 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
     stopSenderRuntime();
     resetSenderSessionState();
     stateEl.textContent = 'starting';
+    senderHarnessDiagnostics.runtimeStartup.attempts += 1;
+    senderHarnessDiagnostics.runtimeStartup.stage = 'request_mic';
+    senderHarnessDiagnostics.runtimeStartup.lastAttemptAtMs = Date.now();
+    senderHarnessDiagnostics.runtimeStartup.lastError = null;
+    senderHarnessDiagnostics.runtimeStartup.workletModuleSelected = null;
+    senderHarnessDiagnostics.runtimeStartup.workletModuleErrors = [];
 
     try {
       const stream = await requestMicStream(window.navigator);
       const track = stream.getAudioTracks()[0];
       if (!track) throw new Error('No audio track available');
 
+      senderHarnessDiagnostics.runtimeStartup.stage = 'init_audio_context';
       const ctx = new AudioContext();
-      await registerWorklet(ctx, '/meter_processor.js');
+      senderHarnessDiagnostics.runtimeStartup.stage = 'register_worklet';
+      await registerSenderWorklet(ctx);
 
+      senderHarnessDiagnostics.runtimeStartup.stage = 'create_audio_graph';
       const graph = createAudioGraphRuntime(ctx, stream);
       const runtimeInfo = collectAudioRuntimeInfo(ctx);
       const inputInfo = readInputTrackDiagnostics(track);
@@ -478,13 +536,15 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       }, 200);
 
       senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
+      senderHarnessDiagnostics.runtimeStartup.stage = 'ready';
+      senderHarnessDiagnostics.runtimeStartup.lastSuccessAtMs = Date.now();
       stateEl.textContent = 'ready';
     } catch (error) {
       resetSenderSessionState();
       stateEl.textContent = 'failed';
-      senderHarnessDiagnostics.lastFailureReason = `Sender runtime startup failed: ${String(error)}`;
-      senderHarnessDiagnostics.transfer.failure.category = 'unknown';
-      senderHarnessDiagnostics.transfer.failure.reason = senderHarnessDiagnostics.lastFailureReason;
+      senderHarnessDiagnostics.runtimeStartup.stage = 'failed';
+      senderHarnessDiagnostics.runtimeStartup.lastError = String(error);
+      setDiagnosticsFailure('unknown', `Sender runtime startup failed: ${String(error)}`);
       renderDiagnostics(diagEl, {
         harness: senderHarnessDiagnostics,
         error: senderHarnessDiagnostics.lastFailureReason,

@@ -262,4 +262,33 @@ describe('sender web shell', () => {
     expect(diag).toContain('Tone toggle failed: Error: Injected tone failure');
     expect(diag).toContain('Unexpected tone toggle failure.');
   });
+
+  it('does not count HELLO transmit attempts when runtime is not started', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+
+    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(diag).toContain('Start sender runtime before transmitting HELLO.');
+    expect(diag).toContain('"frameTransmitAttempts": 0');
+    expect(diag).toContain('"category": "input_validation"');
+  });
+
+  it('includes staged startup diagnostics when worklet module registration fails', async () => {
+    vi.mocked(audioBrowser.registerWorklet).mockRejectedValue(new DOMException("Unable to load a worklet's module.", 'AbortError'));
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-start')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'failed'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(document.querySelector('#sender-state')?.textContent).toBe('failed');
+    expect(diag).toContain('"stage": "failed"');
+    expect(diag).toContain('"workletModuleCandidates"');
+    expect(diag).toContain('"workletModuleErrors"');
+    expect(diag).toContain('/meter_processor.js');
+    expect(diag).toContain('"lastError": "Error: Unable to register sender worklet.');
+  });
 });
