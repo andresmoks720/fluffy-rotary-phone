@@ -16,7 +16,8 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
   rxAnalyser.fftSize = 2048;
 
   const txGain = ctx.createGain();
-  txGain.gain.value = 0;
+  // Keep TX path audible by default so test tone and frame playback are observable.
+  txGain.gain.value = 1;
 
   const outputGain = ctx.createGain();
   outputGain.gain.value = 1;
