@@ -4,6 +4,7 @@ import {
   collectAudioRuntimeInfo,
   createAudioGraphRuntime,
   readInputTrackDiagnostics,
+  LinkTimingEstimator,
   registerWorklet,
   requestMicStream,
   sampleAnalyserLevels,
@@ -14,6 +15,8 @@ import {
 } from '../../../packages/audio-browser/src/index.js';
 
 interface ReceiverRuntime {
+  readonly timing: LinkTimingEstimator;
+  lastRecordedToneStartMs: number | null;
   readonly stream: MediaStream;
   readonly ctx: AudioContext;
   readonly graph: AudioGraphRuntime;
@@ -71,12 +74,23 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement): Promise
     const graph = createAudioGraphRuntime(ctx, stream);
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
+    const timing = new LinkTimingEstimator();
     lastCapture = null;
     waveformDebugBuffer = [];
 
     let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
     const intervalId = window.setInterval(() => {
       levels = sampleAnalyserLevels(graph.rxAnalyser);
+      const toneFrequencyHz = graph.testToneFrequencyHz;
+      const sampleTimestampMs = Date.now();
+      if (graph.testToneStartedAtMs !== null && graph.testToneStartedAtMs !== receiverRuntime?.lastRecordedToneStartMs) {
+        timing.recordTxToneStart(graph.testToneStartedAtMs);
+        if (receiverRuntime) {
+          receiverRuntime.lastRecordedToneStartMs = graph.testToneStartedAtMs;
+        }
+      }
+      timing.recordRxSample(sampleTimestampMs, levels.rms, toneFrequencyHz !== null);
+      const linkTiming = timing.snapshot();
       waveformDebugBuffer = appendWaveformDebugEntry(
         waveformDebugBuffer,
         { timestampMs: Date.now(), levels },
@@ -92,6 +106,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement): Promise
           txPath: 'txGain -> outputGain -> destination'
         },
         rxCapture: lastCapture,
+        linkTiming,
         waveformDebug: {
           entryCount: waveformDebugBuffer.length,
           recent: waveformDebugBuffer
@@ -100,7 +115,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement): Promise
       });
     }, 200);
 
-    receiverRuntime = { stream, ctx, graph, intervalId };
+    receiverRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null };
     stateEl.textContent = 'listen';
   } catch (error) {
     stateEl.textContent = 'failed';

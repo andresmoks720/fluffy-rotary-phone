@@ -2,6 +2,7 @@ import {
   collectAudioRuntimeInfo,
   createAudioGraphRuntime,
   readInputTrackDiagnostics,
+  LinkTimingEstimator,
   registerWorklet,
   requestMicStream,
   sampleAnalyserLevels,
@@ -10,6 +11,8 @@ import {
 } from '../../../packages/audio-browser/src/index.js';
 
 interface SenderRuntime {
+  readonly timing: LinkTimingEstimator;
+  lastRecordedToneStartMs: number | null;
   readonly stream: MediaStream;
   readonly ctx: AudioContext;
   readonly graph: AudioGraphRuntime;
@@ -56,11 +59,21 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
     const graph = createAudioGraphRuntime(ctx, stream);
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
+    const timing = new LinkTimingEstimator();
 
     let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
     const intervalId = window.setInterval(() => {
       levels = sampleAnalyserLevels(graph.rxAnalyser);
       const toneFrequencyHz = graph.testToneFrequencyHz;
+      const sampleTimestampMs = Date.now();
+      if (graph.testToneStartedAtMs !== null && graph.testToneStartedAtMs !== senderRuntime?.lastRecordedToneStartMs) {
+        timing.recordTxToneStart(graph.testToneStartedAtMs);
+        if (senderRuntime) {
+          senderRuntime.lastRecordedToneStartMs = graph.testToneStartedAtMs;
+        }
+      }
+      timing.recordRxSample(sampleTimestampMs, levels.rms, toneFrequencyHz !== null);
+      const linkTiming = timing.snapshot();
       renderDiagnostics(diagEl, {
         runtime: runtimeInfo,
         input: inputInfo,
@@ -73,11 +86,12 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
           active: toneFrequencyHz !== null,
           frequencyHz: toneFrequencyHz
         },
+        linkTiming,
         message: 'Audio runtime initialized; meter active.'
       });
     }, 200);
 
-    senderRuntime = { stream, ctx, graph, intervalId };
+    senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null };
     stateEl.textContent = 'ready';
   } catch (error) {
     stateEl.textContent = 'failed';
