@@ -367,6 +367,74 @@ describe('sender web shell', () => {
   });
 
 
+  it('prevents overlapping HELLO-start requests while file bytes are still loading', async () => {
+    let unblock: (() => void) | null = null;
+    Object.defineProperty(File.prototype, 'arrayBuffer', {
+      configurable: true,
+      value: () => new Promise<ArrayBuffer>((resolve) => {
+        unblock = () => resolve(new Uint8Array([1, 2, 3, 4]).buffer);
+      })
+    });
+
+    await import('../src/main.ts');
+
+    const fileInput = document.querySelector<HTMLInputElement>('#sender-file');
+    const file = new File([new Uint8Array([1, 2, 3, 4])], 'a.bin');
+    Object.defineProperty(fileInput, 'files', {
+      configurable: true,
+      value: { 0: file, length: 1, item: (index: number) => (index === 0 ? file : null) }
+    });
+
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+    document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+
+    const pendingDiag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(pendingDiag).toContain('HELLO transmit request ignored because a previous HELLO attempt is still preparing.');
+
+    unblock?.();
+    for (let i = 0; i < 20; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const snapshot = document.querySelector('#sender-diag')?.textContent ?? '';
+      if (snapshot.includes('HELLO transmitted over live TX path')) {
+        break;
+      }
+    }
+
+    const finalDiag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(finalDiag).toContain('"frameTransmitAttempts": 1');
+    expect(finalDiag).not.toContain('sender START only valid in IDLE');
+  });
+
+  it('retransmits HELLO on timeout and fails after retry limit', async () => {
+    vi.useFakeTimers();
+    try {
+      await import('../src/main.ts');
+
+      const fileInput = document.querySelector<HTMLInputElement>('#sender-file');
+      const file = new File([new Uint8Array([1, 2, 3, 4])], 'a.bin');
+      Object.defineProperty(fileInput, 'files', {
+        configurable: true,
+        value: { 0: file, length: 1, item: (index: number) => (index === 0 ? file : null) }
+      });
+
+      document.querySelector<HTMLButtonElement>('#sender-send-hello')?.click();
+      await vi.advanceTimersByTimeAsync(50);
+
+      for (let i = 0; i < 6; i += 1) {
+        await vi.advanceTimersByTimeAsync(3200);
+      }
+
+      const diag = document.querySelector('#sender-diag')?.textContent ?? '';
+      expect(diag).toContain('"timeoutsHelloAck": 6');
+      expect(diag).toContain('"retransmissions": 5');
+      expect(diag).toContain('"state": "FAILED"');
+      expect(diag).toContain('HELLO_ACK retry limit reached in live sender shell.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+
   it('copies diagnostics snapshot to clipboard', async () => {
     await import('../src/main.ts');
 

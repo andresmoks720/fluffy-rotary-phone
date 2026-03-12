@@ -9,7 +9,7 @@ import {
   type AudioLevelSummary,
   type AudioGraphRuntime
 } from '../../../packages/audio-browser/src/index.js';
-import { FRAME_TYPES, PROFILE_IDS, TIMEOUTS_MS } from '../../../packages/contract/src/index.js';
+import { FRAME_TYPES, PROFILE_IDS, RETRY_LIMITS, TIMEOUTS_MS } from '../../../packages/contract/src/index.js';
 import { crc32c } from '../../../packages/crc/src/index.js';
 import { decodeFrame } from '../../../packages/protocol/src/index.js';
 import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
@@ -71,6 +71,7 @@ const SENDER_WORKLET_MODULE_CANDIDATES = [
 
 let senderRuntime: SenderRuntime | null = null;
 let senderStartInFlight: Promise<void> | null = null;
+let helloTransmitInFlight: Promise<void> | null = null;
 let decodedRxEventListener: ((event: Event) => void) | null = null;
 let senderDiagnosticsFrozen = false;
 let senderDiagnosticsPendingSnapshot: string | null = null;
@@ -80,6 +81,7 @@ let lastSeenAckHex: string | null = null;
 let helloAckDeadlineMs: number | null = null;
 let burstAckDeadlineMs: number | null = null;
 let finalDeadlineMs: number | null = null;
+let pendingHelloBytes: Uint8Array | null = null;
 const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   transfer: createInitialLiveDiagnostics({ state: 'IDLE', currentTurnOwner: 'sender' }),
   frameTransmitAttempts: 0,
@@ -175,6 +177,7 @@ function resetSenderSessionState(): void {
   helloAckDeadlineMs = null;
   burstAckDeadlineMs = null;
   finalDeadlineMs = null;
+  pendingHelloBytes = null;
   senderTransfer = null;
   senderHarnessDiagnostics.transfer = createInitialLiveDiagnostics({ state: 'IDLE', currentTurnOwner: 'sender' });
   senderHarnessDiagnostics.frameTransmitAttempts = 0;
@@ -196,6 +199,7 @@ function prepareForHelloAttempt(): void {
   helloAckDeadlineMs = null;
   burstAckDeadlineMs = null;
   finalDeadlineMs = null;
+  pendingHelloBytes = null;
   senderHarnessDiagnostics.transfer = createInitialLiveDiagnostics({ state: 'HELLO_TX', currentTurnOwner: 'sender' });
   senderHarnessDiagnostics.handshakeSessionId = null;
   senderHarnessDiagnostics.currentTurnOwner = 'sender';
@@ -283,8 +287,13 @@ function updateHandshakeDiagnostics(): void {
         ? 'SEND_BURST'
         : 'FAILED';
   }
-  senderHarnessDiagnostics.transfer.failure.category = handshake.result === 'rejected' ? 'remote_reject' : 'none';
-  senderHarnessDiagnostics.transfer.failure.reason = handshake.reason;
+  if (handshake.result === 'rejected') {
+    senderHarnessDiagnostics.transfer.failure.category = 'remote_reject';
+    senderHarnessDiagnostics.transfer.failure.reason = handshake.reason;
+  } else if (senderHarnessDiagnostics.transfer.failure.category === 'remote_reject') {
+    senderHarnessDiagnostics.transfer.failure.category = 'none';
+    senderHarnessDiagnostics.transfer.failure.reason = null;
+  }
 }
 
 function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): void {
@@ -327,6 +336,15 @@ function transmitFrames(frames: readonly Uint8Array[]): void {
 }
 
 async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): Promise<void> {
+  if (helloTransmitInFlight) {
+    renderDiagnostics(diagEl, {
+      harness: senderHarnessDiagnostics,
+      message: 'HELLO transmit request ignored because a previous HELLO attempt is still preparing.'
+    });
+    return;
+  }
+
+  const transmitPromise = (async () => {
   if (!senderRuntime) {
     const stateEl = root.querySelector<HTMLElement>('#sender-state');
     if (!stateEl) {
@@ -368,6 +386,7 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
       profileId
     });
 
+    pendingHelloBytes = helloBytes;
     playFrameOverTxPath(senderRuntime, helloBytes);
     senderHarnessDiagnostics.transfer.counters.framesTx += 1;
     senderHarnessDiagnostics.lastFailureReason = null;
@@ -385,6 +404,16 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     setDiagnosticsFailure('unknown', String(error));
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
   }
+  })();
+
+  helloTransmitInFlight = transmitPromise;
+  try {
+    await transmitPromise;
+  } finally {
+    if (helloTransmitInFlight === transmitPromise) {
+      helloTransmitInFlight = null;
+    }
+  }
 }
 
 function processHelloAckHex(diagEl: HTMLElement, helloAckHex: string, classification: DecodedRxFrameEventDetail['classification'] = 'ok'): void {
@@ -401,6 +430,7 @@ function processHelloAckHex(diagEl: HTMLElement, helloAckHex: string, classifica
   try {
     senderHandshake.acceptHelloAck(decodeLiveFrameHex(helloAckHex));
     helloAckDeadlineMs = null;
+    pendingHelloBytes = null;
     senderHarnessDiagnostics.transfer.counters.framesRx += 1;
     lastSeenAckHex = helloAckHex;
     updateHandshakeDiagnostics();
@@ -564,10 +594,20 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       senderHarnessDiagnostics.transfer.elapsedMs = senderRuntime === null ? 0 : Date.now() - senderRuntime.startedAtMs;
       if (helloAckDeadlineMs !== null && Date.now() >= helloAckDeadlineMs && senderHarnessDiagnostics.handshakeResult === 'pending') {
         senderHarnessDiagnostics.transfer.counters.timeoutsHelloAck += 1;
-        senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
-        senderHarnessDiagnostics.transfer.failure.category = 'timeout';
-        senderHarnessDiagnostics.transfer.failure.reason = 'HELLO_ACK timeout in live sender shell';
-        helloAckDeadlineMs = Date.now() + TIMEOUTS_MS.HELLO_ACK;
+        if (pendingHelloBytes !== null && senderHarnessDiagnostics.transfer.counters.timeoutsHelloAck <= RETRY_LIMITS.HELLO) {
+          senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
+          playFrameOverTxPath(senderRuntime, pendingHelloBytes);
+          senderHarnessDiagnostics.transfer.counters.framesTx += 1;
+          senderHarnessDiagnostics.transfer.failure.category = 'timeout';
+          senderHarnessDiagnostics.transfer.failure.reason = 'HELLO_ACK timeout in live sender shell; HELLO retransmitted.';
+          helloAckDeadlineMs = Date.now() + TIMEOUTS_MS.HELLO_ACK;
+        } else {
+          senderHarnessDiagnostics.transfer.state = 'FAILED';
+          senderHarnessDiagnostics.transfer.failure.category = 'timeout';
+          senderHarnessDiagnostics.transfer.failure.reason = 'HELLO_ACK retry limit reached in live sender shell.';
+          helloAckDeadlineMs = null;
+          pendingHelloBytes = null;
+        }
       }
       if (burstAckDeadlineMs !== null && Date.now() >= burstAckDeadlineMs && senderTransfer) {
         senderHarnessDiagnostics.transfer.counters.timeoutsBurstAck += 1;
