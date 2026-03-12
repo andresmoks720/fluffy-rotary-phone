@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { FRAME_TYPES, HELLO_REJECT_CODES, PROFILE_IDS } from '../../contract/src/index.js';
-import { decodeFrame } from '../../protocol/src/index.js';
+import { decodeFrame, encodeFrame } from '../../protocol/src/index.js';
 import {
   LiveReceiverHandshake,
   LiveSenderHandshake,
@@ -163,6 +163,83 @@ describe('live handshake integration', () => {
 
     expect(ack.acceptCode).toBe(HELLO_REJECT_CODES.MEMORY_UNAVAILABLE);
     expect(diagnostics.reason).toContain('memory unavailable');
+  });
+
+  it('rejects HELLO when transport params do not match the selected profile defaults', () => {
+    const receiver = new LiveReceiverHandshake({ supportedProfiles: [PROFILE_IDS.SAFE] });
+
+    const helloWithMismatchedPayload = {
+      version: 0x01,
+      frameType: FRAME_TYPES.HELLO,
+      flags: 0x00,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x20000031,
+      fileNameUtf8: asUtf8('mismatch.bin'),
+      fileSizeBytes: 1024n,
+      totalDataFrames: 2,
+      payloadBytesPerFrame: 256,
+      framesPerBurst: 8,
+      fileCrc32c: 0x01020304
+    } as const;
+
+    const helloBytes = encodeFrame(helloWithMismatchedPayload);
+    const result = receiver.handleHello(helloBytes);
+    const ack = decodeFrame(result.helloAckBytes);
+    if (ack.frameType !== FRAME_TYPES.HELLO_ACK) {
+      throw new Error('expected HELLO_ACK frame');
+    }
+
+    expect(ack.acceptCode).toBe(HELLO_REJECT_CODES.INVALID_METADATA);
+    expect(result.diagnostics.reason).toContain('invalid HELLO metadata');
+  });
+
+  it('resets sender and receiver handshake state for repeated runs without reload', () => {
+    const sender = new LiveSenderHandshake();
+    const receiver = new LiveReceiverHandshake({ supportedProfiles: [PROFILE_IDS.SAFE] });
+
+    const helloBytes = sender.emitHello({
+      sessionId: 0x20000041,
+      fileNameUtf8: asUtf8('first.bin'),
+      fileSizeBytes: 1024n,
+      fileCrc32c: 0x11112222,
+      profileId: PROFILE_IDS.SAFE
+    });
+    const firstResult = receiver.handleHello(helloBytes);
+    sender.acceptHelloAck(firstResult.helloAckBytes);
+
+    expect(sender.diagnostics().result).toBe('accepted');
+    expect(receiver.diagnostics().sessionId).toBe(0x20000041);
+
+    sender.reset();
+    receiver.reset();
+
+    expect(sender.diagnostics()).toEqual({
+      sessionId: null,
+      currentTurnOwner: 'sender',
+      result: 'pending',
+      reason: null
+    });
+    expect(receiver.diagnostics()).toEqual({
+      sessionId: null,
+      currentTurnOwner: 'sender',
+      result: 'pending',
+      reason: null
+    });
+
+    const secondHello = sender.emitHello({
+      sessionId: 0x20000042,
+      fileNameUtf8: asUtf8('second.bin'),
+      fileSizeBytes: 1536n,
+      fileCrc32c: 0x33334444,
+      profileId: PROFILE_IDS.SAFE
+    });
+    const secondResult = receiver.handleHello(secondHello);
+    const secondAck = decodeFrame(secondResult.helloAckBytes);
+    if (secondAck.frameType !== FRAME_TYPES.HELLO_ACK) {
+      throw new Error('expected HELLO_ACK frame');
+    }
+    expect(secondAck.acceptCode).toBe(0x00);
+    expect(receiver.diagnostics().sessionId).toBe(0x20000042);
   });
 
 });

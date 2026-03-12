@@ -136,8 +136,8 @@ The roadmap focuses on proving:
 - [x] Implement TX test tone generator.
 - [x] Implement RX raw sample capture.
 - [x] Add waveform debug buffer.
-- [ ] Add basic latency estimate.
-- [ ] Add drift trend measurement.
+- [x] Add basic latency estimate.
+- [x] Add drift trend measurement.
 
 ### Acquisition and modulation
 - [ ] Implement `safe` profile constants.
@@ -308,3 +308,4 @@ The roadmap focuses on proving:
 - [ ] Add richer waveform debug views.
 - [ ] Add exportable run logs.
 - [ ] Add scripted soak-test harness.
+- [x] Add deterministic acceptance evidence template (`docs/acceptance_evidence_template.md`, provisional).

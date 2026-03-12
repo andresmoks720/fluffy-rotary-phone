@@ -19,21 +19,22 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 - [x] Implement TX test tone generator.
 - [x] Implement RX raw sample capture.
 - [x] Add waveform debug buffer.
-- [ ] Add basic latency estimate.
-- [ ] Add drift trend measurement.
+- [x] Add basic latency estimate.
+- [x] Add drift trend measurement.
 - [ ] Decode valid live `safe` frame from RX path (not harness storage).
 
 ### T4 deliverables in progress
 - [x] Sender builds `HELLO` with receiver validation path.
 - [x] Receiver sends `HELLO_ACK` and sender handles accept/reject.
 - [x] Receiver locks accepted session ID.
-- [ ] Handshake acceptance from decoded RX frames in default flow.
-- [ ] Keep storage-coupled flow debug-only.
+- [x] Handshake acceptance from decoded RX frames in default flow.
+- [x] Keep storage-coupled flow debug-only.
 
 ### Acceptance checks for current focus
 - [ ] Live `safe` frame decode succeeds over direct cable in repeated runs.
 - [ ] Live `HELLO`/`HELLO_ACK` proves decoded RX dependency end-to-end.
 - [ ] Diagnostics show session/turn + timeout/retry/error counters during live tests.
+- [x] Add deterministic acceptance evidence template (`docs/acceptance_evidence_template.md`).
 
 ## Notes
 
