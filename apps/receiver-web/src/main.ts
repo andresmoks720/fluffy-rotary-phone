@@ -13,6 +13,13 @@ import {
   type AudioGraphRuntime,
   type WaveformDebugEntry
 } from '../../../packages/audio-browser/src/index.js';
+import { PROFILE_IDS, PROTOCOL_VERSION } from '../../../packages/contract/src/index.js';
+import {
+  createLiveFrameDiagnosticsCounters,
+  decodeSingleFrameForLiveHarness,
+  readFrameDecodeSuccessRate,
+  type LiveFrameDiagnosticsCounters
+} from '../../../packages/protocol/src/index.js';
 
 interface ReceiverRuntime {
   readonly timing: LinkTimingEstimator;
@@ -29,9 +36,27 @@ let lastCapture: {
   readonly levels: AudioLevelSummary;
 } | null = null;
 let waveformDebugBuffer: readonly WaveformDebugEntry[] = [];
+const liveFrameDiagnostics: LiveFrameDiagnosticsCounters = createLiveFrameDiagnosticsCounters();
+const LIVE_HARNESS_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-frame-hex';
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   el.textContent = JSON.stringify(data, null, 2);
+}
+
+function fromHex(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) {
+    throw new Error('invalid frame hex length');
+  }
+
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    const value = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (!Number.isFinite(value)) {
+      throw new Error(`invalid frame hex byte at index ${i}`);
+    }
+    bytes[i] = value;
+  }
+  return bytes;
 }
 
 function stopReceiverRuntime(): void {
@@ -44,6 +69,53 @@ function stopReceiverRuntime(): void {
   receiverRuntime = null;
   lastCapture = null;
   waveformDebugBuffer = [];
+}
+
+function decodeSingleHarnessFrame(diagEl: HTMLElement): void {
+  const frameHex = window.localStorage.getItem(LIVE_HARNESS_STORAGE_KEY);
+  if (!frameHex) {
+    liveFrameDiagnostics.frameAttempts += 1;
+    liveFrameDiagnostics.otherDecodeFailures += 1;
+    liveFrameDiagnostics.lastFailureReason = 'No harness frame found in local storage. Send one from sender app first.';
+    renderDiagnostics(diagEl, {
+      liveFrame: {
+        counters: liveFrameDiagnostics,
+        decodeSuccessRate: readFrameDecodeSuccessRate(liveFrameDiagnostics)
+      }
+    });
+    return;
+  }
+
+  try {
+    const bytes = fromHex(frameHex);
+    const result = decodeSingleFrameForLiveHarness(
+      bytes,
+      {
+        expectedVersion: PROTOCOL_VERSION,
+        expectedProfileId: PROFILE_IDS.SAFE
+      },
+      liveFrameDiagnostics
+    );
+
+    renderDiagnostics(diagEl, {
+      liveFrame: {
+        counters: liveFrameDiagnostics,
+        decodeSuccessRate: readFrameDecodeSuccessRate(liveFrameDiagnostics),
+        decodedFrame: result.frame,
+        lastFailureReason: result.failureReason
+      }
+    });
+  } catch (error) {
+    liveFrameDiagnostics.frameAttempts += 1;
+    liveFrameDiagnostics.otherDecodeFailures += 1;
+    liveFrameDiagnostics.lastFailureReason = String(error);
+    renderDiagnostics(diagEl, {
+      liveFrame: {
+        counters: liveFrameDiagnostics,
+        decodeSuccessRate: readFrameDecodeSuccessRate(liveFrameDiagnostics)
+      }
+    });
+  }
 }
 
 function captureRxSnapshot(diagEl: HTMLElement): void {
@@ -111,6 +183,11 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement): Promise
           entryCount: waveformDebugBuffer.length,
           recent: waveformDebugBuffer
         },
+        liveFrame: {
+          counters: liveFrameDiagnostics,
+          decodeSuccessRate: readFrameDecodeSuccessRate(liveFrameDiagnostics),
+          lastFailureReason: liveFrameDiagnostics.lastFailureReason
+        },
         message: 'Receiver listening shell initialized; meter active.'
       });
     }, 200);
@@ -133,6 +210,7 @@ function mountReceiverShell(root: HTMLElement): void {
         <button id="receiver-start" type="button">Start</button>
         <button id="receiver-cancel" type="button">Cancel</button>
         <button id="receiver-capture" type="button">Capture RX snapshot</button>
+        <button id="receiver-decode-frame" type="button">[dev] Decode one harness frame</button>
       </section>
 
       <section>
@@ -147,10 +225,13 @@ function mountReceiverShell(root: HTMLElement): void {
   const startBtn = root.querySelector<HTMLButtonElement>('#receiver-start');
   const cancelBtn = root.querySelector<HTMLButtonElement>('#receiver-cancel');
   const captureBtn = root.querySelector<HTMLButtonElement>('#receiver-capture');
+  const decodeFrameBtn = root.querySelector<HTMLButtonElement>('#receiver-decode-frame');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn || !decodeFrameBtn) {
     throw new Error('Missing receiver shell elements');
   }
+
+  decodeFrameBtn.hidden = !window.location.hostname.includes('localhost') && window.location.hostname !== '127.0.0.1';
 
   startBtn.addEventListener('click', () => {
     void startReceiver(stateEl, diagEl);
@@ -164,6 +245,10 @@ function mountReceiverShell(root: HTMLElement): void {
 
   captureBtn.addEventListener('click', () => {
     captureRxSnapshot(diagEl);
+  });
+
+  decodeFrameBtn.addEventListener('click', () => {
+    decodeSingleHarnessFrame(diagEl);
   });
 }
 
