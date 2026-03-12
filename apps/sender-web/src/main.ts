@@ -9,9 +9,10 @@ import {
   type AudioLevelSummary,
   type AudioGraphRuntime
 } from '../../../packages/audio-browser/src/index.js';
-import { FLAGS_MVP_DEFAULT, FRAME_TYPES, PROTOCOL_VERSION, PROFILE_IDS } from '../../../packages/contract/src/index.js';
+import { PROFILE_IDS } from '../../../packages/contract/src/index.js';
+import { crc32c } from '../../../packages/crc/src/index.js';
 import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
-import { encodeFrame } from '../../../packages/protocol/src/index.js';
+import { LiveSenderHandshake } from '../../../packages/session/src/index.js';
 
 interface SenderRuntime {
   readonly timing: LinkTimingEstimator;
@@ -26,16 +27,27 @@ interface SenderHarnessDiagnostics {
   frameTransmitAttempts: number;
   lastFailureReason: string | null;
   lastTransmittedFrameHex: string | null;
+  handshakeSessionId: number | null;
+  currentTurnOwner: 'sender' | 'receiver';
+  handshakeResult: 'pending' | 'accepted' | 'rejected';
+  handshakeReason: string | null;
 }
 
 let senderRuntime: SenderRuntime | null = null;
+const senderHandshake = new LiveSenderHandshake();
+let lastSeenAckHex: string | null = null;
 const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   frameTransmitAttempts: 0,
   lastFailureReason: null,
-  lastTransmittedFrameHex: null
+  lastTransmittedFrameHex: null,
+  handshakeSessionId: null,
+  currentTurnOwner: 'sender',
+  handshakeResult: 'pending',
+  handshakeReason: null
 };
 
-const LIVE_HARNESS_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-frame-hex';
+const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
+const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   el.textContent = JSON.stringify(data, null, 2);
@@ -50,6 +62,16 @@ function readTestToneFrequency(root: HTMLElement): number {
   return Math.min(4000, Math.max(200, parsed));
 }
 
+function readSelectedProfileId(root: HTMLElement): number {
+  const select = root.querySelector<HTMLSelectElement>('#sender-profile');
+  if (!select) return PROFILE_IDS.SAFE;
+  const selected = Number(select.value);
+  if (!Number.isFinite(selected)) {
+    return PROFILE_IDS.SAFE;
+  }
+  return selected;
+}
+
 function stopSenderRuntime(): void {
   if (!senderRuntime) return;
 
@@ -62,6 +84,29 @@ function stopSenderRuntime(): void {
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+function fromHex(hex: string): Uint8Array {
+  if (hex.length % 2 !== 0) {
+    throw new Error('invalid frame hex length');
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    const value = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (!Number.isFinite(value)) {
+      throw new Error(`invalid frame hex byte at index ${i}`);
+    }
+    bytes[i] = value;
+  }
+  return bytes;
+}
+
+function updateHandshakeDiagnostics(): void {
+  const handshake = senderHandshake.diagnostics();
+  senderHarnessDiagnostics.handshakeSessionId = handshake.sessionId;
+  senderHarnessDiagnostics.currentTurnOwner = handshake.currentTurnOwner;
+  senderHarnessDiagnostics.handshakeResult = handshake.result;
+  senderHarnessDiagnostics.handshakeReason = handshake.reason;
 }
 
 function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): void {
@@ -88,35 +133,68 @@ function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): vo
   source.start();
 }
 
-function transmitSingleHarnessFrame(diagEl: HTMLElement): void {
+async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): Promise<void> {
   senderHarnessDiagnostics.frameTransmitAttempts += 1;
   if (!senderRuntime) {
-    senderHarnessDiagnostics.lastFailureReason = 'Start sender runtime before transmitting a harness frame.';
+    senderHarnessDiagnostics.lastFailureReason = 'Start sender runtime before transmitting HELLO.';
+    renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
+    return;
+  }
+
+  const fileInput = root.querySelector<HTMLInputElement>('#sender-file');
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    senderHarnessDiagnostics.lastFailureReason = 'Select a file before sending HELLO.';
     renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
     return;
   }
 
   try {
-    const encodedFrame = encodeFrame({
-      version: PROTOCOL_VERSION,
-      frameType: FRAME_TYPES.DATA,
-      flags: FLAGS_MVP_DEFAULT,
-      profileId: PROFILE_IDS.SAFE,
-      sessionId: 1,
-      burstId: 1,
-      slotIndex: 0,
-      payloadFileOffset: 0,
-      payload: new Uint8Array([0x54, 0x33, 0x2d, 0x68, 0x61, 0x72, 0x6e, 0x65, 0x73, 0x73])
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const profileId = readSelectedProfileId(root);
+    const sessionId = window.crypto.getRandomValues(new Uint32Array(1))[0] ?? 1;
+    const helloBytes = senderHandshake.emitHello({
+      sessionId,
+      fileNameUtf8: new TextEncoder().encode(file.name),
+      fileSizeBytes: BigInt(file.size),
+      fileCrc32c: crc32c(bytes),
+      profileId
     });
 
-    playFrameOverTxPath(senderRuntime, encodedFrame);
-    const frameHex = toHex(encodedFrame);
+    playFrameOverTxPath(senderRuntime, helloBytes);
+    const helloHex = toHex(helloBytes);
+    lastSeenAckHex = null;
+    window.localStorage.setItem(LIVE_HELLO_STORAGE_KEY, helloHex);
+
     senderHarnessDiagnostics.lastFailureReason = null;
-    senderHarnessDiagnostics.lastTransmittedFrameHex = frameHex;
-    window.localStorage.setItem(LIVE_HARNESS_STORAGE_KEY, frameHex);
+    senderHarnessDiagnostics.lastTransmittedFrameHex = helloHex;
+    updateHandshakeDiagnostics();
+
     renderDiagnostics(diagEl, {
       harness: senderHarnessDiagnostics,
-      message: 'Harness DATA frame transmitted over TX path and recorded for receiver decode.'
+      message: 'HELLO transmitted over live TX path; waiting for HELLO_ACK.'
+    });
+  } catch (error) {
+    senderHarnessDiagnostics.lastFailureReason = String(error);
+    renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics });
+  }
+}
+
+function maybeConsumeHelloAck(diagEl: HTMLElement): void {
+  const helloAckHex = window.localStorage.getItem(LIVE_HELLO_ACK_STORAGE_KEY);
+  if (!helloAckHex || helloAckHex === lastSeenAckHex) {
+    return;
+  }
+
+  try {
+    senderHandshake.acceptHelloAck(fromHex(helloAckHex));
+    lastSeenAckHex = helloAckHex;
+    updateHandshakeDiagnostics();
+    renderDiagnostics(diagEl, {
+      harness: senderHarnessDiagnostics,
+      message: senderHarnessDiagnostics.handshakeResult === 'accepted'
+        ? 'Received HELLO_ACK accept; sender can proceed to DATA turn.'
+        : `Received HELLO_ACK reject: ${senderHarnessDiagnostics.handshakeReason ?? 'unknown reason'}`
     });
   } catch (error) {
     senderHarnessDiagnostics.lastFailureReason = String(error);
@@ -154,6 +232,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       }
       timing.recordRxSample(sampleTimestampMs, levels.rms, toneFrequencyHz !== null);
       const linkTiming = timing.snapshot();
+      updateHandshakeDiagnostics();
       renderDiagnostics(diagEl, {
         runtime: runtimeInfo,
         input: inputInfo,
@@ -170,6 +249,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
         harness: senderHarnessDiagnostics,
         message: 'Audio runtime initialized; meter active.'
       });
+      maybeConsumeHelloAck(diagEl);
     }, 200);
 
     senderRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null };
@@ -192,12 +272,21 @@ function mountSenderShell(root: HTMLElement): void {
       </section>
 
       <section>
+        <label for="sender-profile">Profile</label>
+        <select id="sender-profile">
+          <option value="${PROFILE_IDS.SAFE}">safe</option>
+          <option value="${PROFILE_IDS.NORMAL}">normal</option>
+          <option value="${PROFILE_IDS.FAST_TEST}">fast_test</option>
+        </select>
+      </section>
+
+      <section>
         <button id="sender-start" type="button">Start</button>
         <button id="sender-cancel" type="button">Cancel</button>
         <label for="sender-tone-frequency">Tone Hz</label>
         <input id="sender-tone-frequency" type="number" min="200" max="4000" step="50" value="1000" />
         <button id="sender-tone-toggle" type="button">Toggle test tone</button>
-        <button id="sender-harness-frame" type="button">[dev] Send one harness frame</button>
+        <button id="sender-send-hello" type="button">Send HELLO</button>
       </section>
 
       <section>
@@ -212,13 +301,11 @@ function mountSenderShell(root: HTMLElement): void {
   const startBtn = root.querySelector<HTMLButtonElement>('#sender-start');
   const cancelBtn = root.querySelector<HTMLButtonElement>('#sender-cancel');
   const toneBtn = root.querySelector<HTMLButtonElement>('#sender-tone-toggle');
-  const harnessFrameBtn = root.querySelector<HTMLButtonElement>('#sender-harness-frame');
+  const sendHelloBtn = root.querySelector<HTMLButtonElement>('#sender-send-hello');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !harnessFrameBtn) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn) {
     throw new Error('Missing sender shell elements');
   }
-
-  harnessFrameBtn.hidden = !window.location.hostname.includes('localhost') && window.location.hostname !== '127.0.0.1';
 
   startBtn.addEventListener('click', () => {
     void startSender(root, stateEl, diagEl);
@@ -244,8 +331,8 @@ function mountSenderShell(root: HTMLElement): void {
     senderRuntime.graph.startTestTone(readTestToneFrequency(root));
   });
 
-  harnessFrameBtn.addEventListener('click', () => {
-    transmitSingleHarnessFrame(diagEl);
+  sendHelloBtn.addEventListener('click', () => {
+    void transmitHelloOverTxPath(root, diagEl);
   });
 }
 
