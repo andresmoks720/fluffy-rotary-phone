@@ -74,6 +74,55 @@ describe('live transfer integration', () => {
     }
   });
 
+
+  it('retries full burst on BURST_ACK timeout then cancels after exhaustion', () => {
+    const payload = new Uint8Array(1024);
+    for (let i = 0; i < payload.length; i += 1) payload[i] = i % 251;
+
+    const sender = new LiveSenderTransfer({ sessionId: 7, profileId: PROFILE_IDS.SAFE, fileBytes: payload });
+    const first = sender.initialBurstFrames();
+    expect(first.txFrames.length).toBeGreaterThan(0);
+
+    let cancelSeen = false;
+    for (let i = 0; i < 16; i += 1) {
+      const retry = sender.onBurstAckTimeout();
+      if (retry.failed && retry.txFrames.length > 0) {
+        const decoded = decodeFrame(retry.txFrames[0] as Uint8Array, { expectedSessionId: 7 });
+        if (decoded.frameType === FRAME_TYPES.CANCEL) {
+          cancelSeen = true;
+          break;
+        }
+      }
+    }
+
+    expect(cancelSeen).toBe(true);
+  });
+
+  it('fails deterministically when BURST_ACK burst metadata mismatches active burst', () => {
+    const payload = new Uint8Array(2048);
+    for (let i = 0; i < payload.length; i += 1) payload[i] = i % 251;
+
+    const sender = new LiveSenderTransfer({ sessionId: 55, profileId: PROFILE_IDS.SAFE, fileBytes: payload });
+    sender.initialBurstFrames();
+
+    const badAck = encodeFrame({
+      version: 0x01,
+      frameType: FRAME_TYPES.BURST_ACK,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 55,
+      burstId: 99,
+      slotCount: 1,
+      ackBitmap: 0x0001
+    });
+
+    const result = sender.onBurstAck(badAck);
+    expect(result.failed).toBe(true);
+    expect(result.txFrames.length).toBe(1);
+    const decoded = decodeFrame(result.txFrames[0] as Uint8Array, { expectedSessionId: 55 });
+    expect(decoded.frameType).toBe(FRAME_TYPES.CANCEL);
+  });
+
   it('retries END on final timeout then emits CANCEL after exhaustion', () => {
     const payload = Uint8Array.from([1, 2, 3, 4, 5]);
     const sender = new LiveSenderTransfer({ sessionId: 1, profileId: PROFILE_IDS.SAFE, fileBytes: payload });

@@ -59,6 +59,11 @@ export class LiveSenderTransfer {
     if (decoded.frameType !== FRAME_TYPES.BURST_ACK) {
       return { txFrames: [], done: false, failed: true };
     }
+    const expectedSlotCount = this.slotCountForBurst(this.burstId);
+    if (decoded.burstId !== this.burstId || decoded.slotCount !== expectedSlotCount) {
+      this.state = 'failed';
+      return { txFrames: [this.encodeCancel(CANCEL_REASON_CODES.UNRECOVERABLE_PROTOCOL_ERROR)], done: false, failed: true };
+    }
 
     const missing = missingSlotsFromAckBitmap(decoded.slotCount, decoded.ackBitmap);
     if (missing.length === 0) {
@@ -81,6 +86,20 @@ export class LiveSenderTransfer {
 
     this.state = 'wait_burst_ack';
     return this.emitBurst(missing);
+  }
+
+  onBurstAckTimeout(): SenderStepResult {
+    if (this.state !== 'wait_burst_ack') {
+      return { txFrames: [], done: false, failed: true };
+    }
+    this.burstRetryCount += 1;
+    if (this.burstRetryCount > RETRY_LIMITS.PER_BURST) {
+      this.state = 'failed';
+      return { txFrames: [this.encodeCancel(CANCEL_REASON_CODES.LOCAL_TIMEOUT)], done: false, failed: true };
+    }
+
+    this.state = 'wait_burst_ack';
+    return this.emitBurst();
   }
 
   onFinal(finalBytes: Uint8Array): SenderStepResult {
@@ -112,7 +131,7 @@ export class LiveSenderTransfer {
   }
 
   private emitBurst(onlyMissingSlots?: readonly number[]): SenderStepResult {
-    const slotCount = Math.min(this.framesPerBurst, this.totalDataFrames - this.burstId * this.framesPerBurst);
+    const slotCount = this.slotCountForBurst(this.burstId);
     const slots = onlyMissingSlots ?? Array.from({ length: slotCount }, (_, i) => i);
     const txFrames: Uint8Array[] = [];
     for (const slotIndex of slots) {
@@ -134,6 +153,10 @@ export class LiveSenderTransfer {
     }
     this.state = 'wait_burst_ack';
     return { txFrames, done: false, failed: false };
+  }
+
+  private slotCountForBurst(burstId: number): number {
+    return Math.min(this.framesPerBurst, this.totalDataFrames - burstId * this.framesPerBurst);
   }
 
   private encodeEnd(): Uint8Array {

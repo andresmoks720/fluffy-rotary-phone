@@ -185,14 +185,14 @@ The roadmap focuses on proving:
 
 ### Burst logic
 - [x] Implement `DATA` burst builder.
-- [ ] Implement burst ID sequencing.
-- [ ] Implement slot index sequencing.
+- [x] Implement burst ID sequencing.
+- [x] Implement slot index sequencing.
 - [x] Implement receiver burst tracking.
 - [x] Build `BURST_ACK`.
 - [x] Retransmit only missing/corrupt slots.
 - [x] Ignore duplicates correctly.
 - [x] Handle final short burst correctly.
-- [ ] Enforce timeout rules.
+- [x] Enforce timeout rules.
 - [x] Enforce retry-budget rules.
 
 ### Metrics

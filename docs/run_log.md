@@ -84,6 +84,42 @@ Chronological implementation and validation notes.
   - Pass/Fail: PASS (integration test scope)
   - Notes: This run validates browser shell transfer state transitions from decoded RX frames, not physical cable transport.
 
+### Direct-cable acceptance matrix (`safe`) — pending live hardware execution
+
+Environment note: direct cable/browser runtime proof requires local Chrome + physical audio loopback/cable devices. This CI/container can update procedures and acceptance fields but cannot synthesize trustworthy live-cable evidence.
+
+#### Tiny-file repeats (target: >=5)
+
+| Run ID | Date (UTC) | Size bytes | Final state | CRC result | Elapsed ms | Goodput bps | Retransmit ratio | Timeouts (H/B/F) | Sync-loss count | Notes |
+|---|---|---:|---|---|---:|---:|---:|---|---:|---|
+| tiny-1 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| tiny-2 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| tiny-3 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| tiny-4 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| tiny-5 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+
+#### 1 MiB repeats (target: >=3)
+
+| Run ID | Date (UTC) | Size bytes | Final state | CRC result | Elapsed ms | Goodput bps | Retransmit ratio | Timeouts (H/B/F) | Sync-loss count | Notes |
+|---|---|---:|---|---|---:|---:|---:|---|---:|---|
+| 1mib-1 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| 1mib-2 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| 1mib-3 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+
+#### 10 MiB repeats (target: >=3)
+
+| Run ID | Date (UTC) | Size bytes | Final state | CRC result | Elapsed ms | Goodput bps | Retransmit ratio | Timeouts (H/B/F) | Sync-loss count | Notes |
+|---|---|---:|---|---|---:|---:|---:|---|---:|---|
+| 10mib-1 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| 10mib-2 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+| 10mib-3 | pending | pending | pending | pending | pending | pending | pending | pending | pending | pending |
+
+### Idle soak evidence log (T2 stability) — pending live hardware execution
+
+| Soak run ID | Date (UTC) | Duration min | Worklet crashes observed | Unexpected state transitions | Timeout deltas during idle | Pass/Fail | Notes |
+|---|---|---:|---:|---:|---|---|---|
+| soak-1 | pending | pending | pending | pending | pending | pending | pending |
+
 ### Acceptance run (direct-cable evidence placeholder)
 
 - Milestone: T3/T8 direct-cable live acceptance
