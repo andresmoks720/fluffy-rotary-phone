@@ -33,6 +33,8 @@ describe('createAudioGraphRuntime', () => {
     expect(ctx.createMediaStreamSource).toHaveBeenCalled();
     expect(analyser.fftSize).toBe(2048);
     expect(source.connect).toHaveBeenCalledWith(analyser);
+    expect(txGain.gain.value).toBe(1);
+    expect(outputGain.gain.value).toBe(1);
     expect(txGain.connect).toHaveBeenCalledWith(outputGain);
     expect(outputGain.connect).toHaveBeenCalledWith(destination);
 
