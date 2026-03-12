@@ -71,6 +71,8 @@ const SENDER_WORKLET_MODULE_CANDIDATES = [
 let senderRuntime: SenderRuntime | null = null;
 let senderStartInFlight: Promise<void> | null = null;
 let decodedRxEventListener: ((event: Event) => void) | null = null;
+let senderDiagnosticsFrozen = false;
+let senderDiagnosticsPendingSnapshot: string | null = null;
 const senderHandshake = new LiveSenderHandshake();
 let senderTransfer: LiveSenderTransfer | null = null;
 let lastSeenAckHex: string | null = null;
@@ -101,7 +103,45 @@ const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
 };
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
-  el.textContent = JSON.stringify(data, null, 2);
+  const snapshot = JSON.stringify(data, null, 2);
+  if (senderDiagnosticsFrozen) {
+    senderDiagnosticsPendingSnapshot = snapshot;
+    return;
+  }
+  el.textContent = snapshot;
+}
+
+function setSenderDiagnosticsFrozen(root: HTMLElement, frozen: boolean): void {
+  senderDiagnosticsFrozen = frozen;
+  const freezeBtn = root.querySelector<HTMLButtonElement>('#sender-diag-freeze-toggle');
+  const statusEl = root.querySelector<HTMLElement>('#sender-diag-freeze-status');
+  if (freezeBtn) {
+    freezeBtn.textContent = frozen ? 'Resume diagnostics' : 'Freeze diagnostics';
+  }
+  if (statusEl) {
+    statusEl.textContent = frozen
+      ? 'Diagnostics frozen (snapshot locked for copy).' : 'Diagnostics live (auto-updating).';
+  }
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const fallback = document.createElement('textarea');
+  fallback.value = text;
+  fallback.setAttribute('readonly', 'true');
+  fallback.style.position = 'fixed';
+  fallback.style.opacity = '0';
+  document.body.appendChild(fallback);
+  fallback.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(fallback);
+  if (!copied) {
+    throw new Error('Clipboard API unavailable and copy command failed.');
+  }
 }
 
 function readTestToneFrequency(root: HTMLElement): number {
@@ -621,6 +661,9 @@ export function mountSenderShell(root: HTMLElement): void {
 
       <section>
         <h2>Diagnostics</h2>
+        <p id="sender-diag-freeze-status">Diagnostics live (auto-updating).</p>
+        <button id="sender-diag-freeze-toggle" type="button">Freeze diagnostics</button>
+        <button id="sender-diag-copy" type="button">Copy diagnostics</button>
         <pre id="sender-diag">Diagnostics pending runtime initialization.</pre>
       </section>
     </main>
@@ -632,13 +675,51 @@ export function mountSenderShell(root: HTMLElement): void {
   const cancelBtn = root.querySelector<HTMLButtonElement>('#sender-cancel');
   const toneBtn = root.querySelector<HTMLButtonElement>('#sender-tone-toggle');
   const sendHelloBtn = root.querySelector<HTMLButtonElement>('#sender-send-hello');
+  const freezeDiagBtn = root.querySelector<HTMLButtonElement>('#sender-diag-freeze-toggle');
+  const copyDiagBtn = root.querySelector<HTMLButtonElement>('#sender-diag-copy');
   const debugStorageInput = root.querySelector<HTMLInputElement>('#sender-debug-storage');
   const debugAckInput = root.querySelector<HTMLInputElement>('#sender-debug-ack-hex');
   const debugAckProcessBtn = root.querySelector<HTMLButtonElement>('#sender-debug-ack-process');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn || !freezeDiagBtn || !copyDiagBtn) {
     throw new Error('Missing sender shell elements');
   }
+
+  setSenderDiagnosticsFrozen(root, false);
+
+  freezeDiagBtn.addEventListener('click', () => {
+    const nextFrozen = !senderDiagnosticsFrozen;
+    setSenderDiagnosticsFrozen(root, nextFrozen);
+    if (!nextFrozen && senderDiagnosticsPendingSnapshot !== null) {
+      diagEl.textContent = senderDiagnosticsPendingSnapshot;
+      senderDiagnosticsPendingSnapshot = null;
+    }
+  });
+
+  copyDiagBtn.addEventListener('click', () => {
+    void (async () => {
+      const snapshot = diagEl.textContent ?? '';
+      try {
+        await copyTextToClipboard(snapshot);
+        renderDiagnostics(diagEl, {
+          harness: senderHarnessDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: snapshot.length
+          },
+          message: 'Diagnostics copied to clipboard.'
+        });
+      } catch (error) {
+        renderDiagnostics(diagEl, {
+          harness: senderHarnessDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: 0,
+            error: String(error)
+          },
+          message: 'Failed to copy diagnostics to clipboard.'
+        });
+      }
+    })();
+  });
 
   if (decodedRxEventListener) {
     window.removeEventListener(SENDER_DECODED_RX_EVENT, decodedRxEventListener);
