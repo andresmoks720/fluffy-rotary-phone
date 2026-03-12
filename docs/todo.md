@@ -36,6 +36,15 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 - [x] Implement RX raw sample capture.
 - [x] Add waveform debug buffer.
 
+
+## T4 increment 1 progress
+
+- [x] Wire sender handshake trigger (file + selected profile) to HELLO frame TX wiring.
+- [x] Validate HELLO on receiver side (size, profile support, memory feasibility) and return HELLO_ACK.
+- [x] Lock receiver session ID after accept and reject conflicting session proposals.
+- [x] Surface session handshake diagnostics (session ID, turn owner, result/reason).
+- [x] Add deterministic live-wiring handshake integration tests for accept and reject paths.
+
 ## Notes
 
 - Protocol source of truth remains `docs/mvp.md`.

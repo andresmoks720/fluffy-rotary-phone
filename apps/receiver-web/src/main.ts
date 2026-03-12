@@ -26,6 +26,11 @@ let lastCapture: {
   readonly levels: AudioLevelSummary;
 } | null = null;
 let waveformDebugBuffer: readonly WaveformDebugEntry[] = [];
+const receiverSessionDiagnostics = {
+  sessionId: null,
+  turnOwner: 'sender',
+  handshake: { status: 'idle' }
+};
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   el.textContent = JSON.stringify(data, null, 2);
@@ -96,6 +101,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement): Promise
           entryCount: waveformDebugBuffer.length,
           recent: waveformDebugBuffer
         },
+        session: receiverSessionDiagnostics,
         message: 'Receiver listening shell initialized; meter active.'
       });
     }, 200);

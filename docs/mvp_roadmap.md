@@ -164,16 +164,16 @@ The roadmap focuses on proving:
 ## T4 — Live handshake
 
 ### Negotiation
-- [ ] Sender builds `HELLO`.
-- [ ] Receiver validates file size, profile support, and memory feasibility.
-- [ ] Receiver sends `HELLO_ACK`.
-- [ ] Sender handles accept vs reject cleanly.
-- [ ] Receiver locks accepted session ID.
+- [x] Sender builds `HELLO`.
+- [x] Receiver validates file size, profile support, and memory feasibility.
+- [x] Receiver sends `HELLO_ACK`.
+- [x] Sender handles accept vs reject cleanly.
+- [x] Receiver locks accepted session ID.
 
 ### UI integration
-- [ ] Show session ID.
-- [ ] Show current turn owner.
-- [ ] Show negotiation success/failure.
+- [x] Show session ID.
+- [x] Show current turn owner.
+- [x] Show negotiation success/failure.
 
 ### Done when
 - [ ] Live `HELLO` / `HELLO_ACK` works over `safe`.
