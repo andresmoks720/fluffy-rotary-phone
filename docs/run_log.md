@@ -48,3 +48,71 @@ Chronological implementation and validation notes.
   - repeated 10 MiB simulated transfers (3 runs),
   - final-timeout retry exhaustion emitting CANCEL.
 - Installed missing workspace test dependency (`jsdom`) and re-ran full workspace tests.
+
+## 2026-03-13
+
+### Acceptance run (browser decoded-RX transfer integration; simulated frame feed)
+
+- Milestone: T5/T6/T7 browser transfer wiring from decoded RX frames
+- Date (UTC): 2026-03-13
+- Operator: codex agent
+- Sender commit: working tree (pre-commit)
+- Receiver commit: working tree (pre-commit)
+- Profile (`safe` for MVP): safe
+- Runtime/browser: vitest + jsdom browser shell tests
+- Link setup (cable/adapter): simulated decoded RX event feed
+
+- Command: `pnpm --filter @audio-modem/sender-web test && pnpm --filter @audio-modem/receiver-web test`
+- Check list:
+  - [x] start succeeds
+  - [x] handshake succeeds from decoded RX flow
+  - [x] transfer completion result explicit (`FINAL_OK`/`FINAL_BAD`)
+  - [x] cancel/failure returns both sides to clean idle
+
+- Observed metrics:
+  - Transfer size bytes: sender test fixture 4 bytes / receiver fixture 1024-byte metadata case
+  - Elapsed ms: test-scale (< 1s per case)
+  - Effective goodput bps: modeled diagnostics field populated on sender success path
+  - Frames TX / RX: asserted through diagnostics transitions and event sequence
+  - Retransmissions: diagnostics counters present and mutable in transfer flow
+  - Timeout counts (`HELLO_ACK`, `BURST_ACK`, `FINAL`): diagnostics counters present and mutable
+  - Header CRC failures: diagnostics counter exposed
+  - Payload CRC failures: diagnostics counter exposed
+  - Last failure/cancel reason: diagnostics field exposed and updated on failures
+
+- Result:
+  - Pass/Fail: PASS (integration test scope)
+  - Notes: This run validates browser shell transfer state transitions from decoded RX frames, not physical cable transport.
+
+### Acceptance run (direct-cable evidence placeholder)
+
+- Milestone: T3/T8 direct-cable live acceptance
+- Date (UTC): 2026-03-13
+- Operator: pending
+- Sender commit: pending
+- Receiver commit: pending
+- Profile (`safe` for MVP): safe
+- Runtime/browser: Chrome (pending)
+- Link setup (cable/adapter): direct plug (pending)
+
+- Command: pending cable execution
+- Check list:
+  - [ ] start succeeds
+  - [ ] handshake succeeds from decoded RX flow
+  - [ ] transfer completion result explicit (`FINAL_OK`/`FINAL_BAD`)
+  - [ ] cancel/failure returns both sides to clean idle
+
+- Observed metrics:
+  - Transfer size bytes: pending (must include repeated 10 MiB)
+  - Elapsed ms: pending
+  - Effective goodput bps: pending
+  - Frames TX / RX: pending
+  - Retransmissions: pending
+  - Timeout counts (`HELLO_ACK`, `BURST_ACK`, `FINAL`): pending
+  - Header CRC failures: pending
+  - Payload CRC failures: pending
+  - Last failure/cancel reason: pending
+
+- Result:
+  - Pass/Fail: PENDING
+  - Notes: Blocked on physical cable run execution outside this CI/container environment.

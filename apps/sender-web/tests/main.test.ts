@@ -120,8 +120,46 @@ describe('sender web shell', () => {
       }
     }));
 
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const burstAckHex = Array.from(encodeFrame({
+      version: PROTOCOL_VERSION,
+      frameType: FRAME_TYPES.BURST_ACK,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x12345678,
+      burstId: 0,
+      slotCount: 1,
+      ackBitmap: 0x0001
+    })).map((v) => v.toString(16).padStart(2, '0')).join('');
+
+    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:sender-decoded-rx-frame', {
+      detail: {
+        frameHex: burstAckHex,
+        frameType: 'BURST_ACK',
+        classification: 'ok'
+      }
+    }));
+
+    const finalOkHex = Array.from(encodeFrame({
+      version: PROTOCOL_VERSION,
+      frameType: FRAME_TYPES.FINAL_OK,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x12345678,
+      observedFileCrc32c: 0x29308cf4
+    })).map((v) => v.toString(16).padStart(2, '0')).join('');
+
+    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:sender-decoded-rx-frame', {
+      detail: {
+        frameHex: finalOkHex,
+        frameType: 'FINAL_OK',
+        classification: 'ok'
+      }
+    }));
+
     const diag = document.querySelector('#sender-diag')?.textContent ?? '';
     expect(diag).toContain('"handshakeResult": "accepted"');
+    expect(diag).toContain('"state": "SUCCEEDED"');
 
     document.querySelector<HTMLButtonElement>('#sender-cancel')?.click();
     expect(document.querySelector('#sender-state')?.textContent).toBe('cancelled');

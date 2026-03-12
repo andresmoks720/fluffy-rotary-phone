@@ -24,7 +24,7 @@ The roadmap focuses on proving:
 
 ## Operating rules
 
-- [ ] Build exactly one reliable path first: `safe`.
+- [x] Build exactly one reliable path first: `safe` (gate retained; `normal`/`fast-test` remain blocked pending repeated live safe runs).
 - [ ] Do not implement `normal` or `fast-test` until `safe` completes repeated 10 MiB transfers.
 - [ ] Do not optimize speed before protocol correctness, retransmission, and cleanup are proven.
 - [ ] If measurements contradict provisional PHY constants, update both code and `mvp.md` in the same change.
@@ -164,11 +164,11 @@ The roadmap focuses on proving:
 ## T4 — Live handshake
 
 ### Negotiation
-- [ ] Sender builds `HELLO`.
-- [ ] Receiver validates file size, profile support, and memory feasibility.
-- [ ] Receiver sends `HELLO_ACK`.
-- [ ] Sender handles accept vs reject cleanly.
-- [ ] Receiver locks accepted session ID.
+- [x] Sender builds `HELLO`.
+- [x] Receiver validates file size, profile support, and memory feasibility.
+- [x] Receiver sends `HELLO_ACK`.
+- [x] Sender handles accept vs reject cleanly.
+- [x] Receiver locks accepted session ID.
 
 ### UI integration
 - [ ] Show session ID.
@@ -184,16 +184,16 @@ The roadmap focuses on proving:
 ## T5 — Live burst transport
 
 ### Burst logic
-- [ ] Implement `DATA` burst builder.
+- [x] Implement `DATA` burst builder.
 - [ ] Implement burst ID sequencing.
 - [ ] Implement slot index sequencing.
-- [ ] Implement receiver burst tracking.
-- [ ] Build `BURST_ACK`.
-- [ ] Retransmit only missing/corrupt slots.
-- [ ] Ignore duplicates correctly.
-- [ ] Handle final short burst correctly.
+- [x] Implement receiver burst tracking.
+- [x] Build `BURST_ACK`.
+- [x] Retransmit only missing/corrupt slots.
+- [x] Ignore duplicates correctly.
+- [x] Handle final short burst correctly.
 - [ ] Enforce timeout rules.
-- [ ] Enforce retry-budget rules.
+- [x] Enforce retry-budget rules.
 
 ### Metrics
 - [ ] Record burst RTT.
@@ -215,11 +215,11 @@ The roadmap focuses on proving:
 - [ ] Split file into `DATA` frames.
 - [ ] Reconstruct receiver buffer by absolute offset.
 - [ ] Track missing ranges / missing slots.
-- [ ] Send `END` with final metadata and file CRC32C.
-- [ ] Receiver recomputes file CRC32C.
-- [ ] Receiver sends `FINAL_OK` or `FINAL_BAD`.
-- [ ] Save file only after verified success.
-- [ ] Discard buffer on failure or cancel.
+- [x] Send `END` with final metadata and file CRC32C.
+- [x] Receiver recomputes file CRC32C.
+- [x] Receiver sends `FINAL_OK` or `FINAL_BAD`.
+- [x] Save file only after verified success.
+- [x] Discard buffer on failure or cancel.
 
 ### Done when
 - [ ] Small files transfer successfully over `safe`.
@@ -309,3 +309,9 @@ The roadmap focuses on proving:
 - [ ] Add exportable run logs.
 - [ ] Add scripted soak-test harness.
 - [x] Add deterministic acceptance evidence template (`docs/acceptance_evidence_template.md`, provisional).
+
+
+## Safe-first gate evidence
+
+- [x] Browser/event-driven `safe` transfer state transitions covered in automated tests before enabling higher profiles.
+- [ ] Repeated live cable `safe` runs (including 10 MiB) recorded in `docs/run_log.md` before any `normal` live claims.
