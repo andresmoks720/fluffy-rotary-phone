@@ -1,3 +1,9 @@
 import { defineConfig } from 'vite';
 
-export default defineConfig({});
+export default defineConfig({
+  base: '/fluffy-rotary-phone/sender/',
+  build: {
+    outDir: '../../dist/sender',
+    emptyOutDir: true
+  }
+});
