@@ -427,11 +427,18 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       }
       if (burstAckDeadlineMs !== null && Date.now() >= burstAckDeadlineMs && senderTransfer) {
         senderHarnessDiagnostics.transfer.counters.timeoutsBurstAck += 1;
-        senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
         senderHarnessDiagnostics.transfer.failure.category = 'timeout';
         senderHarnessDiagnostics.transfer.failure.reason = 'BURST_ACK timeout in live sender shell';
-        senderHarnessDiagnostics.transfer.state = 'FAILED';
-        burstAckDeadlineMs = null;
+        const retry = senderTransfer.onBurstAckTimeout();
+        if (retry.txFrames.length > 0) {
+          senderHarnessDiagnostics.transfer.counters.retransmissions += retry.txFrames.length;
+          senderHarnessDiagnostics.transfer.counters.burstsTx += 1;
+        }
+        transmitFrames(retry.txFrames);
+        burstAckDeadlineMs = retry.failed ? null : Date.now() + TIMEOUTS_MS.BURST_ACK;
+        if (retry.failed) {
+          senderHarnessDiagnostics.transfer.state = 'FAILED';
+        }
       }
       if (finalDeadlineMs !== null && Date.now() >= finalDeadlineMs && senderTransfer) {
         senderHarnessDiagnostics.transfer.counters.timeoutsFinal += 1;

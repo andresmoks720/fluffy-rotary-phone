@@ -48,7 +48,7 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 
 ### T7 progress
 - [x] Add repeated 10 MiB simulated-transfer acceptance tests (3 runs) in automated suite.
-- [ ] Capture repeated direct-cable browser acceptance evidence in `docs/run_log.md` (small + 10 MiB runs) after full cable setup runs.
+- [ ] Capture repeated direct-cable browser acceptance evidence in `docs/run_log.md` (tiny + 1 MiB + 10 MiB matrix rows) after full cable setup runs.
 
 ## Notes
 
@@ -59,3 +59,4 @@ This file tracks implementation order and status, derived from `docs/mvp_roadmap
 ### T2 stability procedure
 - [x] Define scripted soak-run procedure (`docs/soak_test_procedure.md`) with explicit pass/fail thresholds and diagnostics sampling cadence.
 - [ ] Execute 10+ minute idle soak and record evidence in `docs/run_log.md`.
+- [x] Add direct-cable acceptance matrix + soak evidence tables to `docs/run_log.md` for deterministic run capture.
