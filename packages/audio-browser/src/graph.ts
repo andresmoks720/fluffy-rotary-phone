@@ -4,6 +4,7 @@ export interface AudioGraphRuntime {
   readonly txGain: GainNode;
   readonly outputGain: GainNode;
   readonly testToneFrequencyHz: number | null;
+  readonly testToneStartedAtMs: number | null;
   startTestTone(frequencyHz?: number): void;
   stopTestTone(): void;
   dispose(): void;
@@ -29,6 +30,7 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
 
   let testTone: OscillatorNode | null = null;
   let testToneFrequencyHz: number | null = null;
+  let testToneStartedAtMs: number | null = null;
 
   function stopTestTone(): void {
     if (!testTone) {
@@ -39,6 +41,7 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
     testTone.disconnect();
     testTone = null;
     testToneFrequencyHz = null;
+    testToneStartedAtMs = null;
   }
 
   function startTestTone(frequencyHz = 1000): void {
@@ -52,6 +55,7 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
 
     testTone = oscillator;
     testToneFrequencyHz = frequencyHz;
+    testToneStartedAtMs = Date.now();
   }
 
   return {
@@ -61,6 +65,9 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
     outputGain,
     get testToneFrequencyHz() {
       return testToneFrequencyHz;
+    },
+    get testToneStartedAtMs() {
+      return testToneStartedAtMs;
     },
     startTestTone,
     stopTestTone,
