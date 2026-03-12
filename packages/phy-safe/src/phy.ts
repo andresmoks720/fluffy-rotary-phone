@@ -22,6 +22,71 @@ function requiredChipCount(bytesLength: number): number {
   return bytesLength * 8;
 }
 
+function mapChipToCarrierWave(
+  chip: number,
+  chipIndex: number,
+  sampleRateHz: number,
+  samplesPerChip: number,
+  config: SafeCarrierModulationConfig
+): Float32Array {
+  const samples = new Float32Array(samplesPerChip);
+  const chipStartSample = chipIndex * samplesPerChip;
+  for (let sampleOffset = 0; sampleOffset < samplesPerChip; sampleOffset += 1) {
+    const sampleIndex = chipStartSample + sampleOffset;
+    const phase = (2 * Math.PI * config.carrierFrequencyHz * sampleIndex) / sampleRateHz;
+    samples[sampleOffset] = chip * config.amplitude * Math.sin(phase);
+  }
+  return samples;
+}
+
+export interface SafeCarrierModulationConfig {
+  readonly carrierFrequencyHz: number;
+  readonly samplesPerChip: number;
+  readonly amplitude: number;
+}
+
+export const DEFAULT_SAFE_CARRIER_MODULATION: SafeCarrierModulationConfig = {
+  carrierFrequencyHz: SAFE_PHY_CONSTANTS.centerFrequencyHz,
+  samplesPerChip: 24,
+  amplitude: 0.1
+} as const;
+
+export function modulateSafeBpskToWaveform(
+  payload: Uint8Array,
+  sampleRateHz: number,
+  config: SafeCarrierModulationConfig = DEFAULT_SAFE_CARRIER_MODULATION
+): Float32Array {
+  if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0) {
+    throw new Error('sampleRateHz must be a positive finite number.');
+  }
+
+  if (!Number.isInteger(config.samplesPerChip) || config.samplesPerChip <= 0) {
+    throw new Error('samplesPerChip must be a positive integer.');
+  }
+
+  if (!Number.isFinite(config.amplitude) || config.amplitude <= 0 || config.amplitude > 1) {
+    throw new Error('amplitude must be a finite number in (0, 1].');
+  }
+
+  const nyquistHz = sampleRateHz / 2;
+  if (!Number.isFinite(config.carrierFrequencyHz) || config.carrierFrequencyHz <= 0 || config.carrierFrequencyHz >= nyquistHz) {
+    throw new Error('carrierFrequencyHz must be finite, positive, and below Nyquist.');
+  }
+
+  const chips = modulateSafeBpsk(payload);
+  const waveform = new Float32Array(chips.length * config.samplesPerChip);
+  for (let i = 0; i < chips.length; i += 1) {
+    const chip = chips[i];
+    if (chip === undefined) {
+      throw new Error(`missing modulated chip at index ${i}`);
+    }
+    const mapped = mapChipToCarrierWave(chip, i, sampleRateHz, config.samplesPerChip, config);
+    waveform.set(mapped, i * config.samplesPerChip);
+  }
+
+  return waveform;
+}
+
 export function generateSafePreamble(): Float32Array {
   assertInteger(SAFE_PREAMBLE_SYMBOLS, 'SAFE_PREAMBLE_SYMBOLS');
   const totalChips = SAFE_PREAMBLE_SYMBOLS * SAFE_PHY_CONSTANTS.carrierCount;

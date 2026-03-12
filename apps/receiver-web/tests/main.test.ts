@@ -38,7 +38,12 @@ vi.mock('../../../packages/audio-browser/src/index.js', () => {
 });
 
 vi.mock('../../../packages/phy-safe/src/index.js', () => ({
-  modulateSafeBpsk: () => new Int8Array([1, -1, 1, -1])
+  DEFAULT_SAFE_CARRIER_MODULATION: {
+    carrierFrequencyHz: 1500,
+    samplesPerChip: 24,
+    amplitude: 0.1
+  },
+  modulateSafeBpskToWaveform: () => new Float32Array([0.1, -0.1, 0.1, -0.1])
 }));
 
 class FakeAudioContext {

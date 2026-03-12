@@ -15,7 +15,7 @@ import {
 } from '../../../packages/audio-browser/src/index.js';
 import { FRAME_TYPES } from '../../../packages/contract/src/index.js';
 import { decodeFrame } from '../../../packages/protocol/src/index.js';
-import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
+import { DEFAULT_SAFE_CARRIER_MODULATION, modulateSafeBpskToWaveform } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
   decodeLiveFrameHex,
@@ -134,23 +134,41 @@ function applyDecodeClassification(classification: DecodedRxFrameEventDetail['cl
   }
 }
 
-function playFrameOverTxPath(runtime: ReceiverRuntime, frameBytes: Uint8Array): void {
-  const chips = modulateSafeBpsk(frameBytes);
-  const chipSamples = 24;
-  const output = runtime.ctx.createBuffer(1, chips.length * chipSamples, runtime.ctx.sampleRate);
-  const channel = output.getChannelData(0);
 
-  for (let i = 0; i < chips.length; i += 1) {
-    const chip = chips[i];
-    if (chip === undefined) {
-      throw new Error(`missing modulated chip at index ${i}`);
-    }
-    const sampleValue = chip * 0.1;
-    const startIndex = i * chipSamples;
-    for (let sampleIndex = 0; sampleIndex < chipSamples; sampleIndex += 1) {
-      channel[startIndex + sampleIndex] = sampleValue;
-    }
-  }
+function readTxCarrierFrequency(root: HTMLElement): number {
+  const input = root.querySelector<HTMLInputElement>('#receiver-carrier-frequency');
+  const fallback = DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz;
+  if (!input) return fallback;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(8000, Math.max(200, parsed));
+}
+
+function readTxBandwidth(root: HTMLElement): number {
+  const input = root.querySelector<HTMLInputElement>('#receiver-bandwidth');
+  if (!input) return 2000;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed)) return 2000;
+  return Math.min(6000, Math.max(200, parsed));
+}
+
+function deriveSamplesPerChip(sampleRateHz: number, bandwidthHz: number): number {
+  const raw = Math.round(sampleRateHz / bandwidthHz);
+  return Math.min(256, Math.max(4, raw));
+}
+
+function playFrameOverTxPath(runtime: ReceiverRuntime, frameBytes: Uint8Array, root: HTMLElement): void {
+  const carrierFrequencyHz = readTxCarrierFrequency(root);
+  const bandwidthHz = readTxBandwidth(root);
+  const chipSamples = deriveSamplesPerChip(runtime.ctx.sampleRate, bandwidthHz);
+  const waveform = modulateSafeBpskToWaveform(frameBytes, runtime.ctx.sampleRate, {
+    carrierFrequencyHz,
+    samplesPerChip: chipSamples,
+    amplitude: DEFAULT_SAFE_CARRIER_MODULATION.amplitude
+  });
+  const output = runtime.ctx.createBuffer(1, waveform.length, runtime.ctx.sampleRate);
+  const channel = output.getChannelData(0);
+  channel.set(waveform);
 
   const source = runtime.ctx.createBufferSource();
   source.buffer = output;
@@ -231,7 +249,7 @@ function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToS
     if (writeDebugAckToStorage) {
       window.localStorage.setItem(LIVE_HELLO_ACK_STORAGE_KEY, ackHex);
     }
-    playFrameOverTxPath(receiverRuntime, helloAckBytes);
+    playFrameOverTxPath(receiverRuntime, helloAckBytes, document.body);
     handshakeDiagnostics.transfer.counters.framesTx += 1;
     lastSeenHelloHex = helloHex;
     handshakeDiagnostics.lastFailureReason = null;
@@ -269,7 +287,7 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
       handshakeDiagnostics.transfer.counters.framesRx += 1;
       handshakeDiagnostics.transfer.counters.burstsRx += 1;
       const ack = receiverTransfer.emitBurstAck();
-      playFrameOverTxPath(receiverRuntime, ack);
+      playFrameOverTxPath(receiverRuntime, ack, document.body);
       handshakeDiagnostics.transfer.counters.framesTx += 1;
       handshakeDiagnostics.transfer.state = 'WAIT_DATA';
       renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Receiver processed DATA and transmitted BURST_ACK.' });
@@ -278,7 +296,7 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
 
     if (detail.frameType === 'END') {
       const final = receiverTransfer.onEnd(frameBytes);
-      playFrameOverTxPath(receiverRuntime, final);
+      playFrameOverTxPath(receiverRuntime, final, document.body);
       handshakeDiagnostics.transfer.counters.framesRx += 1;
       handshakeDiagnostics.transfer.counters.framesTx += 1;
       lastFinalResponseHex = toHex(final);
@@ -427,6 +445,10 @@ export function mountReceiverShell(root: HTMLElement): void {
       <section>
         <button id="receiver-start" type="button">Start</button>
         <button id="receiver-cancel" type="button">Cancel</button>
+        <label for="receiver-carrier-frequency">TX carrier Hz</label>
+        <input id="receiver-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" />
+        <label for="receiver-bandwidth">TX bandwidth Hz</label>
+        <input id="receiver-bandwidth" type="number" min="200" max="6000" step="50" value="2000" />
         <button id="receiver-capture" type="button">Capture RX snapshot</button>
       </section>
 

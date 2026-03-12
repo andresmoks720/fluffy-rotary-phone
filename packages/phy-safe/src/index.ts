@@ -7,7 +7,9 @@ export {
 export {
   generateSafePreamble,
   generateSafeTrainingBlock,
+  DEFAULT_SAFE_CARRIER_MODULATION,
   modulateSafeBpsk,
+  modulateSafeBpskToWaveform,
   demodulateSafeBpsk,
   detectSafePreamble
 } from './phy.js';

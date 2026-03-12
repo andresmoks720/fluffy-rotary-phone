@@ -12,7 +12,7 @@ import {
 import { FRAME_TYPES, PROFILE_IDS, RETRY_LIMITS, TIMEOUTS_MS } from '../../../packages/contract/src/index.js';
 import { crc32c } from '../../../packages/crc/src/index.js';
 import { decodeFrame } from '../../../packages/protocol/src/index.js';
-import { modulateSafeBpsk } from '../../../packages/phy-safe/src/index.js';
+import { DEFAULT_SAFE_CARRIER_MODULATION, modulateSafeBpskToWaveform } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
   decodeLiveFrameHex,
@@ -39,6 +39,11 @@ interface DecodedRxFrameEventDetail {
 }
 
 interface SenderHarnessDiagnostics {
+  txModulation: {
+    carrierFrequencyHz: number;
+    bandwidthHz: number;
+  };
+
   transfer: LiveDiagnosticsModel;
   frameTransmitAttempts: number;
   lastFailureReason: string | null;
@@ -83,6 +88,10 @@ let burstAckDeadlineMs: number | null = null;
 let finalDeadlineMs: number | null = null;
 let pendingHelloBytes: Uint8Array | null = null;
 const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
+  txModulation: {
+    carrierFrequencyHz: DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz,
+    bandwidthHz: 2000
+  },
   transfer: createInitialLiveDiagnostics({ state: 'IDLE', currentTurnOwner: 'sender' }),
   frameTransmitAttempts: 0,
   lastFailureReason: null,
@@ -162,6 +171,28 @@ function readSelectedProfileId(root: HTMLElement): number {
   return Number.isFinite(selected) ? selected : PROFILE_IDS.SAFE;
 }
 
+
+function readTxCarrierFrequency(root: HTMLElement): number {
+  const input = root.querySelector<HTMLInputElement>('#sender-carrier-frequency');
+  const fallback = DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz;
+  if (!input) return fallback;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(8000, Math.max(200, parsed));
+}
+
+function readTxBandwidth(root: HTMLElement): number {
+  const input = root.querySelector<HTMLInputElement>('#sender-bandwidth');
+  if (!input) return 2000;
+  const parsed = Number(input.value);
+  if (!Number.isFinite(parsed)) return 2000;
+  return Math.min(6000, Math.max(200, parsed));
+}
+
+function deriveSamplesPerChip(sampleRateHz: number, bandwidthHz: number): number {
+  const raw = Math.round(sampleRateHz / bandwidthHz);
+  return Math.min(256, Math.max(4, raw));
+}
 function stopSenderRuntime(): void {
   if (!senderRuntime) return;
   window.clearInterval(senderRuntime.intervalId);
@@ -296,28 +327,25 @@ function updateHandshakeDiagnostics(): void {
   }
 }
 
-function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): void {
-  const chips = modulateSafeBpsk(frameBytes);
-  const chipSamples = 24;
-  const output = runtime.ctx.createBuffer(1, chips.length * chipSamples, runtime.ctx.sampleRate);
+function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array, root: HTMLElement): void {
+  const carrierFrequencyHz = readTxCarrierFrequency(root);
+  const bandwidthHz = readTxBandwidth(root);
+  const chipSamples = deriveSamplesPerChip(runtime.ctx.sampleRate, bandwidthHz);
+  const waveform = modulateSafeBpskToWaveform(frameBytes, runtime.ctx.sampleRate, {
+    carrierFrequencyHz,
+    samplesPerChip: chipSamples,
+    amplitude: DEFAULT_SAFE_CARRIER_MODULATION.amplitude
+  });
+  senderHarnessDiagnostics.txModulation.carrierFrequencyHz = carrierFrequencyHz;
+  senderHarnessDiagnostics.txModulation.bandwidthHz = bandwidthHz;
+  const output = runtime.ctx.createBuffer(1, waveform.length, runtime.ctx.sampleRate);
   const channel = output.getChannelData(0);
-
-  for (let i = 0; i < chips.length; i += 1) {
-    const chip = chips[i];
-    if (chip === undefined) {
-      throw new Error(`missing modulated chip at index ${i}`);
-    }
-    const sampleValue = chip * 0.1;
-    const startIndex = i * chipSamples;
-    for (let sampleIndex = 0; sampleIndex < chipSamples; sampleIndex += 1) {
-      channel[startIndex + sampleIndex] = sampleValue;
-    }
-  }
+  channel.set(waveform);
 
   const source = runtime.ctx.createBufferSource();
   source.buffer = output;
   source.connect(runtime.graph.txGain);
-  const frameDurationSec = (chips.length * chipSamples) / runtime.ctx.sampleRate;
+  const frameDurationSec = waveform.length / runtime.ctx.sampleRate;
   const scheduleFloorSec = runtime.ctx.currentTime + 0.005;
   const startTimeSec = Math.max(scheduleFloorSec, runtime.nextTxStartTimeSec);
   source.start(startTimeSec);
@@ -327,10 +355,10 @@ function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): vo
   };
 }
 
-function transmitFrames(frames: readonly Uint8Array[]): void {
+function transmitFrames(frames: readonly Uint8Array[], root: HTMLElement): void {
   if (!senderRuntime || frames.length === 0) return;
   for (const frame of frames) {
-    playFrameOverTxPath(senderRuntime, frame);
+    playFrameOverTxPath(senderRuntime, frame, root);
   }
   senderHarnessDiagnostics.transfer.counters.framesTx += frames.length;
 }
@@ -387,7 +415,7 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     });
 
     pendingHelloBytes = helloBytes;
-    playFrameOverTxPath(senderRuntime, helloBytes);
+    playFrameOverTxPath(senderRuntime, helloBytes, root);
     senderHarnessDiagnostics.transfer.counters.framesTx += 1;
     senderHarnessDiagnostics.lastFailureReason = null;
     senderHarnessDiagnostics.transfer.failure.category = 'none';
@@ -447,7 +475,7 @@ function processHelloAckHex(diagEl: HTMLElement, helloAckHex: string, classifica
           const step = senderTransfer.initialBurstFrames();
           senderHarnessDiagnostics.transfer.state = 'SEND_BURST';
           senderHarnessDiagnostics.transfer.counters.burstsTx += 1;
-          transmitFrames(step.txFrames);
+          transmitFrames(step.txFrames, document.body);
           burstAckDeadlineMs = Date.now() + TIMEOUTS_MS.BURST_ACK;
         });
       }
@@ -482,7 +510,7 @@ function processSenderTransferFrame(diagEl: HTMLElement, detail: DecodedRxFrameE
   if (detail.frameType === 'BURST_ACK') {
     burstAckDeadlineMs = null;
     const result = senderTransfer.onBurstAck(frameBytes);
-    transmitFrames(result.txFrames);
+    transmitFrames(result.txFrames, document.body);
     if (result.txFrames.length > 0 && !result.failed) {
       const firstTx = decodeFrame(result.txFrames[0] ?? new Uint8Array(), { expectedSessionId: senderHarnessDiagnostics.handshakeSessionId ?? undefined });
       if (firstTx.frameType === FRAME_TYPES.END) {
@@ -596,7 +624,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
         senderHarnessDiagnostics.transfer.counters.timeoutsHelloAck += 1;
         if (pendingHelloBytes !== null && senderHarnessDiagnostics.transfer.counters.timeoutsHelloAck <= RETRY_LIMITS.HELLO) {
           senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
-          playFrameOverTxPath(senderRuntime, pendingHelloBytes);
+          playFrameOverTxPath(senderRuntime, pendingHelloBytes, document.body);
           senderHarnessDiagnostics.transfer.counters.framesTx += 1;
           senderHarnessDiagnostics.transfer.failure.category = 'timeout';
           senderHarnessDiagnostics.transfer.failure.reason = 'HELLO_ACK timeout in live sender shell; HELLO retransmitted.';
@@ -618,7 +646,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
           senderHarnessDiagnostics.transfer.counters.retransmissions += retry.txFrames.length;
           senderHarnessDiagnostics.transfer.counters.burstsTx += 1;
         }
-        transmitFrames(retry.txFrames);
+        transmitFrames(retry.txFrames, document.body);
         burstAckDeadlineMs = retry.failed ? null : Date.now() + TIMEOUTS_MS.BURST_ACK;
         if (retry.failed) {
           senderHarnessDiagnostics.transfer.state = 'FAILED';
@@ -627,7 +655,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
       if (finalDeadlineMs !== null && Date.now() >= finalDeadlineMs && senderTransfer) {
         senderHarnessDiagnostics.transfer.counters.timeoutsFinal += 1;
         const retry = senderTransfer.onFinalTimeout();
-        transmitFrames(retry.txFrames);
+        transmitFrames(retry.txFrames, document.body);
         finalDeadlineMs = Date.now() + TIMEOUTS_MS.FINAL_RESULT;
       }
       updateHandshakeDiagnostics();
@@ -733,6 +761,10 @@ export function mountSenderShell(root: HTMLElement): void {
         <label for="sender-tone-frequency">Tone Hz</label>
         <input id="sender-tone-frequency" type="number" min="200" max="4000" step="50" value="1000" />
         <button id="sender-tone-toggle" type="button">Toggle test tone</button>
+        <label for="sender-carrier-frequency">TX carrier Hz</label>
+        <input id="sender-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" />
+        <label for="sender-bandwidth">TX bandwidth Hz</label>
+        <input id="sender-bandwidth" type="number" min="200" max="6000" step="50" value="2000" />
         <button id="sender-send-hello" type="button">Send HELLO</button>
       </section>
 
