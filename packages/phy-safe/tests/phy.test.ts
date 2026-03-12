@@ -4,11 +4,13 @@ import {
   SAFE_PHY_CONSTANTS,
   SAFE_PREAMBLE_SYMBOLS,
   SAFE_TRAINING_SYMBOLS,
+  DEFAULT_SAFE_CARRIER_MODULATION,
   demodulateSafeBpsk,
   detectSafePreamble,
   generateSafePreamble,
   generateSafeTrainingBlock,
-  modulateSafeBpsk
+  modulateSafeBpsk,
+  modulateSafeBpskToWaveform
 } from '../src/index.js';
 
 describe('safe PHY constants', () => {
@@ -239,5 +241,29 @@ describe('safe PHY BER and bit-order guarantees', () => {
     expect(lowBer).toBeLessThanOrEqual(0.001);
     expect(medBer).toBeGreaterThanOrEqual(0.001);
     expect(medBer).toBeLessThanOrEqual(0.2);
+  });
+});
+
+
+describe('safe BPSK carrier waveform mapping', () => {
+  it('maps payload chips onto an audible carrier waveform', () => {
+    const waveform = modulateSafeBpskToWaveform(Uint8Array.from([0x80]), 48000);
+    expect(waveform.length).toBe(8 * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
+    const peak = Math.max(...Array.from(waveform).map((value) => Math.abs(value)));
+    expect(peak).toBeGreaterThan(0.05);
+    expect(peak).toBeLessThanOrEqual(DEFAULT_SAFE_CARRIER_MODULATION.amplitude + 1e-6);
+  });
+
+  it('fails loudly for invalid carrier modulation config', () => {
+    expect(() => modulateSafeBpskToWaveform(Uint8Array.from([0x01]), 48000, {
+      carrierFrequencyHz: 30000,
+      samplesPerChip: 24,
+      amplitude: 0.1
+    })).toThrow(/below Nyquist/);
+    expect(() => modulateSafeBpskToWaveform(Uint8Array.from([0x01]), 48000, {
+      carrierFrequencyHz: 1500,
+      samplesPerChip: 0,
+      amplitude: 0.1
+    })).toThrow(/positive integer/);
   });
 });

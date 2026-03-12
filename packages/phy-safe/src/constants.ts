@@ -3,6 +3,8 @@ export const SAFE_PHY_CONSTANTS = {
   modulation: 'BPSK',
   carrierCount: 16,
   carrierSpacingHz: 125,
+  centerFrequencyHz: 1500,
+  txBandwidthHz: 1200,
   symbolRateHz: 250,
   preambleDurationMs: 300,
   trainingDurationMs: 400,

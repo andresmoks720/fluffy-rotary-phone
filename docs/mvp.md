@@ -27,6 +27,7 @@ This MVP is intended to prove:
 - one file per session,
 - file transfer up to **10 MiB**,
 - configurable manual transfer profiles,
+- configurable manual TX carrier frequency and TX bandwidth controls for bring-up diagnostics,
 - per-frame integrity checks,
 - whole-file integrity verification before save,
 - minimal UI with diagnostic feedback,
@@ -173,6 +174,15 @@ Each transmitting turn consists of:
 4. end-of-turn guard interval.
 
 Preamble and training are per-turn, not per-frame.
+
+### Manual TX tuning controls (MVP bring-up)
+
+For direct-cable bring-up, sender and receiver UIs expose manual TX controls:
+
+- TX carrier frequency (Hz),
+- TX bandwidth hint (Hz), mapped to chip/symbol timing conservatively.
+
+These controls are implementation-level tuning knobs for reliability debugging. They do not change the wire protocol and do not change profile negotiation semantics.
 
 ### Not required in MVP
 
