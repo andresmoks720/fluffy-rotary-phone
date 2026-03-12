@@ -1,0 +1,30 @@
+export type SenderState =
+  | 'IDLE'
+  | 'HELLO_TX'
+  | 'WAIT_HELLO_ACK'
+  | 'SEND_BURST'
+  | 'WAIT_BURST_ACK'
+  | 'RETX_BURST'
+  | 'SEND_END'
+  | 'WAIT_FINAL'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export type SenderEvent =
+  | 'START'
+  | 'HELLO_SENT'
+  | 'HELLO_ACK_ACCEPT'
+  | 'HELLO_ACK_REJECT'
+  | 'BURST_SENT'
+  | 'BURST_ACK_ALL'
+  | 'BURST_ACK_PARTIAL'
+  | 'RETX_SENT'
+  | 'END_SENT'
+  | 'FINAL_OK'
+  | 'FINAL_BAD'
+  | 'TIMEOUT_RETRY'
+  | 'RETRY_EXHAUSTED'
+  | 'ENCODE_ERROR'
+  | 'CANCEL'
+  | 'RESET';

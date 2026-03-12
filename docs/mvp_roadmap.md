@@ -35,88 +35,88 @@ The roadmap focuses on proving:
 ## T0 — Freeze the contract
 
 ### Protocol contract
-- [ ] Freeze protocol version and frame type codes.
-- [ ] Freeze `safe` profile ID.
-- [ ] Freeze cancel/failure reason codes.
-- [ ] Create shared constants module.
+- [x] Freeze protocol version and frame type codes.
+- [x] Freeze `safe` profile ID.
+- [x] Freeze cancel/failure reason codes.
+- [x] Create shared constants module.
 
 ### CRC and wire format
-- [ ] Implement CRC32C exactly as specified.
-- [ ] Add CRC32C golden vectors.
-- [ ] Freeze binary layout for all frame types.
-- [ ] Add encode/decode tests for all frame types.
+- [x] Implement CRC32C exactly as specified.
+- [x] Add CRC32C golden vectors.
+- [x] Freeze binary layout for all frame types.
+- [x] Add encode/decode tests for all frame types.
 
 ### ACK and state rules
-- [ ] Implement ACK bitmap semantics exactly as specified.
-- [ ] Add ACK bitmap worked-example tests.
-- [ ] Implement sender state machine.
-- [ ] Implement receiver state machine.
-- [ ] Add state transition tests for valid, invalid, timeout, retry-exhausted, and cancel cases.
+- [x] Implement ACK bitmap semantics exactly as specified.
+- [x] Add ACK bitmap worked-example tests.
+- [x] Implement sender state machine.
+- [x] Implement receiver state machine.
+- [x] Add state transition tests for valid, invalid, timeout, retry-exhausted, and cancel cases.
 
 ### Done when
-- [ ] No protocol ambiguity remains in code/tests.
-- [ ] Golden vectors pass.
-- [ ] State transition tests pass.
+- [x] No protocol ambiguity remains in code/tests.
+- [x] Golden vectors pass.
+- [x] State transition tests pass.
 
 ---
 
 ## T1 — Deterministic core without live audio
 
 ### Frame codec
-- [ ] Implement pure frame encoder.
-- [ ] Implement pure frame decoder.
-- [ ] Reject malformed headers and malformed payloads.
-- [ ] Reject invalid version, session ID, profile, and turn ownership.
-- [ ] Handle duplicate frames deterministically.
+- [x] Implement pure frame encoder.
+- [x] Implement pure frame decoder.
+- [x] Reject malformed headers and malformed payloads.
+- [x] Reject invalid version, session ID, profile, and turn ownership.
+- [x] Handle duplicate frames deterministically.
 
 ### Session controller
-- [ ] Implement sender controller.
-- [ ] Implement receiver controller.
-- [ ] Enforce turn ownership.
-- [ ] Enforce session ID lock.
-- [ ] Enforce timeout handling.
-- [ ] Enforce retry-budget handling.
-- [ ] Enforce cancel/failure transitions.
+- [x] Implement sender controller.
+- [x] Implement receiver controller.
+- [x] Enforce turn ownership.
+- [x] Enforce session ID lock.
+- [x] Enforce timeout handling.
+- [x] Enforce retry-budget handling.
+- [x] Enforce cancel/failure transitions.
 
 ### Simulated transfer flow
-- [ ] Simulate `HELLO` / `HELLO_ACK`.
-- [ ] Simulate one data burst.
-- [ ] Simulate selective retransmission.
-- [ ] Simulate `END` / `FINAL_OK`.
-- [ ] Simulate `FINAL_BAD`.
-- [ ] Simulate cancel from either side.
+- [x] Simulate `HELLO` / `HELLO_ACK`.
+- [x] Simulate one data burst.
+- [x] Simulate selective retransmission.
+- [x] Simulate `END` / `FINAL_OK`.
+- [x] Simulate `FINAL_BAD`.
+- [x] Simulate cancel from either side.
 
 ### Done when
-- [ ] Complete transfer flow works without browser audio.
-- [ ] Controllers cannot enter illegal states.
-- [ ] Parser behavior is deterministic.
+- [x] Complete transfer flow works without browser audio.
+- [x] Controllers cannot enter illegal states.
+- [x] Parser behavior is deterministic.
 
 ---
 
 ## T2 — Browser shell and audio foundation
 
 ### App shell
-- [ ] Create minimal sender screen.
-- [ ] Create minimal receiver screen.
-- [ ] Add file picker.
-- [ ] Add start / cancel buttons.
-- [ ] Add diagnostics panel shell.
+- [x] Create minimal sender screen.
+- [x] Create minimal receiver screen.
+- [x] Add file picker.
+- [x] Add start / cancel buttons.
+- [x] Add diagnostics panel shell.
 
 ### Audio runtime
-- [ ] Request mic with required constraints.
-- [ ] Create playback path.
-- [ ] Create `AudioContext`.
-- [ ] Register `AudioWorklet`.
-- [ ] Establish TX sample path.
-- [ ] Establish RX sample path.
+- [x] Request mic with required constraints.
+- [x] Create playback path.
+- [x] Create `AudioContext`.
+- [x] Register `AudioWorklet`.
+- [x] Establish TX sample path.
+- [x] Establish RX sample path.
 
 ### Audio diagnostics
-- [ ] Show actual `getSettings()` values.
-- [ ] Show actual sample rate.
-- [ ] Show channel count.
-- [ ] Show applied audio-processing flags.
-- [ ] Add amplitude meter.
-- [ ] Add clipping detector.
+- [x] Show actual `getSettings()` values.
+- [x] Show actual sample rate.
+- [x] Show channel count.
+- [x] Show applied audio-processing flags.
+- [x] Add amplitude meter.
+- [x] Add clipping detector.
 
 ### Stability
 - [ ] Verify idle runtime stability for 10+ minutes.
@@ -133,9 +133,9 @@ The roadmap focuses on proving:
 ## T3 — Live PHY bring-up for `safe`
 
 ### Raw waveform tools
-- [ ] Implement TX test tone generator.
-- [ ] Implement RX raw sample capture.
-- [ ] Add waveform debug buffer.
+- [x] Implement TX test tone generator.
+- [x] Implement RX raw sample capture.
+- [x] Add waveform debug buffer.
 - [ ] Add basic latency estimate.
 - [ ] Add drift trend measurement.
 
