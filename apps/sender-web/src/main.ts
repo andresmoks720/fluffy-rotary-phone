@@ -387,9 +387,7 @@ export function mountSenderShell(root: HTMLElement): void {
       <section>
         <label for="sender-profile">Profile</label>
         <select id="sender-profile">
-          <option value="${PROFILE_IDS.SAFE}">safe</option>
-          <option value="${PROFILE_IDS.NORMAL}">normal</option>
-          <option value="${PROFILE_IDS.FAST_TEST}">fast_test</option>
+          <option value="${PROFILE_IDS.SAFE}">safe (MVP default)</option>
         </select>
       </section>
 
