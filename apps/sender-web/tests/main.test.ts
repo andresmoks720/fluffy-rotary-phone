@@ -182,11 +182,23 @@ describe('sender web shell', () => {
 
     const diag = document.querySelector('#sender-diag')?.textContent ?? '';
     expect(diag).toContain('"handshakeResult": "accepted"');
-    expect(diag).toContain('"state": "SUCCEEDED"');
+    expect(diag).toContain('"senderState": "SUCCEEDED"');
 
     document.querySelector<HTMLButtonElement>('#sender-cancel')?.click();
     expect(document.querySelector('#sender-state')?.textContent).toBe('cancelled');
     expect(document.querySelector('#sender-diag')?.textContent ?? '').toContain('"sessionId": null');
+  });
+
+  it('supports separate status and verbose diagnostics views', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-diag-tab-verbose')?.click();
+    const verbose = document.querySelector('#sender-diag-verbose')?.textContent ?? '';
+    expect(verbose).toContain('Sender shell mounted. Diagnostics initialized.');
+
+    document.querySelector<HTMLButtonElement>('#sender-diag-tab-status')?.click();
+    const status = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(status).toContain('"senderState"');
   });
 
   it('starts runtime automatically before toggling tone', async () => {
@@ -448,7 +460,7 @@ describe('sender web shell', () => {
 
     const writeText = vi.mocked(navigator.clipboard.writeText);
     expect(writeText).toHaveBeenCalledTimes(1);
-    expect((writeText.mock.calls[0]?.[0] ?? '')).toContain('Diagnostics pending runtime initialization');
+    expect((writeText.mock.calls[0]?.[0] ?? '')).toContain('"senderState"');
 
     const diag = document.querySelector('#sender-diag')?.textContent ?? '';
     expect(diag).toContain('Diagnostics copied to clipboard.');
