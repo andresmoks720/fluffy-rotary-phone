@@ -8,6 +8,7 @@ export interface AudioGraphRuntime {
   readonly rxDownmixMonoBus: GainNode;
   readonly rxSilentSink: GainNode;
   readonly rxStreamTapNode: AudioWorkletNode | null;
+  readonly rxWorkletOutputSink: GainNode | null;
   readonly txGain: GainNode;
   readonly outputGain: GainNode;
   readonly testToneFrequencyHz: number | null;
@@ -58,15 +59,20 @@ export function createAudioGraphRuntime(
   rxSilentSink.connect(ctx.destination);
 
   let rxStreamTapNode: AudioWorkletNode | null = null;
+  let rxWorkletOutputSink: GainNode | null = null;
   if (options.rxWorkletProcessorName && typeof AudioWorkletNode !== 'undefined') {
+    rxWorkletOutputSink = ctx.createGain();
+    rxWorkletOutputSink.gain.value = 0;
     rxStreamTapNode = new AudioWorkletNode(ctx, options.rxWorkletProcessorName, {
       numberOfInputs: 1,
-      numberOfOutputs: 0,
+      numberOfOutputs: 1,
       channelCount: 1,
       channelCountMode: 'explicit',
       channelInterpretation: 'speakers'
     });
     rxDownmixMonoBus.connect(rxStreamTapNode);
+    rxStreamTapNode.connect(rxWorkletOutputSink);
+    rxWorkletOutputSink.connect(ctx.destination);
   }
 
   txGain.connect(outputGain);
@@ -107,6 +113,7 @@ export function createAudioGraphRuntime(
     rxDownmixMonoBus,
     rxSilentSink,
     rxStreamTapNode,
+    rxWorkletOutputSink,
     txGain,
     outputGain,
     get testToneFrequencyHz() {
@@ -127,6 +134,7 @@ export function createAudioGraphRuntime(
       rxSilentSink.disconnect();
       rxAnalyser.disconnect();
       rxStreamTapNode?.disconnect();
+      rxWorkletOutputSink?.disconnect();
       txGain.disconnect();
       outputGain.disconnect();
     }
