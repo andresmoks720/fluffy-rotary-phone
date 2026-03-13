@@ -49,6 +49,16 @@ function normalizeDecodedFrameType(frameType: string | undefined): string | unde
 
 interface ReceiverHandshakeDiagnostics {
   transfer: LiveDiagnosticsModel;
+  runtimeStartup: {
+    attempts: number;
+    stage: 'idle' | 'request_mic' | 'init_audio_context' | 'register_worklet' | 'create_audio_graph' | 'ready' | 'failed';
+    lastAttemptAtMs: number | null;
+    lastSuccessAtMs: number | null;
+    workletModuleCandidates: readonly string[];
+    workletModuleSelected: string | null;
+    workletModuleErrors: readonly string[];
+    lastError: string | null;
+  };
   transferBytesSaved: number;
   invalidTurnEvents: number;
   sessionId: number | null;
@@ -63,6 +73,10 @@ const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('deb
 const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame';
+const RECEIVER_WORKLET_MODULE_CANDIDATES = [
+  '/meter_processor.js',
+  new URL('meter_processor.js', window.location.href).toString()
+] as const;
 
 let receiverRuntime: ReceiverRuntime | null = null;
 const receiverHandshake = new LiveReceiverHandshake();
@@ -76,6 +90,16 @@ let lastCapture: {
 let waveformDebugBuffer: readonly WaveformDebugEntry[] = [];
 const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   transfer: createInitialLiveDiagnostics({ state: 'LISTEN', currentTurnOwner: 'sender' }),
+  runtimeStartup: {
+    attempts: 0,
+    stage: 'idle',
+    lastAttemptAtMs: null,
+    lastSuccessAtMs: null,
+    workletModuleCandidates: RECEIVER_WORKLET_MODULE_CANDIDATES,
+    workletModuleSelected: null,
+    workletModuleErrors: [],
+    lastError: null
+  },
   sessionId: null,
   currentTurnOwner: 'sender',
   handshakeResult: 'pending',
@@ -209,6 +233,23 @@ function resetReceiverSessionState(): void {
   handshakeDiagnostics.invalidTurnEvents = 0;
   receiverTransfer = null;
   lastFinalResponseHex = null;
+}
+
+async function registerReceiverWorklet(ctx: AudioContext): Promise<void> {
+  const errors: string[] = [];
+  for (const moduleUrl of RECEIVER_WORKLET_MODULE_CANDIDATES) {
+    try {
+      await registerWorklet(ctx, moduleUrl);
+      handshakeDiagnostics.runtimeStartup.workletModuleSelected = moduleUrl;
+      handshakeDiagnostics.runtimeStartup.workletModuleErrors = errors;
+      return;
+    } catch (error) {
+      errors.push(`${moduleUrl}: ${String(error)}`);
+    }
+  }
+
+  handshakeDiagnostics.runtimeStartup.workletModuleErrors = errors;
+  throw new Error(`Unable to register receiver worklet. Attempted modules: ${errors.join(' | ')}`);
 }
 
 function captureRxSnapshot(diagEl: HTMLElement): void {
@@ -360,15 +401,24 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
   stopReceiverRuntime();
   resetReceiverSessionState();
   stateEl.textContent = 'starting';
+  handshakeDiagnostics.runtimeStartup.attempts += 1;
+  handshakeDiagnostics.runtimeStartup.lastAttemptAtMs = Date.now();
+  handshakeDiagnostics.runtimeStartup.stage = 'request_mic';
+  handshakeDiagnostics.runtimeStartup.lastError = null;
+  handshakeDiagnostics.runtimeStartup.workletModuleSelected = null;
+  handshakeDiagnostics.runtimeStartup.workletModuleErrors = [];
 
   try {
     const stream = await requestMicStream(window.navigator);
     const track = stream.getAudioTracks()[0];
     if (!track) throw new Error('No audio track available');
 
+    handshakeDiagnostics.runtimeStartup.stage = 'init_audio_context';
     const ctx = new AudioContext();
-    await registerWorklet(ctx, '/meter_processor.js');
+    handshakeDiagnostics.runtimeStartup.stage = 'register_worklet';
+    await registerReceiverWorklet(ctx);
 
+    handshakeDiagnostics.runtimeStartup.stage = 'create_audio_graph';
     const graph = createAudioGraphRuntime(ctx, stream);
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
@@ -420,11 +470,15 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     }, 200);
 
     receiverRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
+    handshakeDiagnostics.runtimeStartup.stage = 'ready';
+    handshakeDiagnostics.runtimeStartup.lastSuccessAtMs = Date.now();
     stateEl.textContent = 'listen';
   } catch (error) {
     resetReceiverSessionState();
+    handshakeDiagnostics.runtimeStartup.stage = 'failed';
+    handshakeDiagnostics.runtimeStartup.lastError = String(error);
     stateEl.textContent = 'failed';
-    renderDiagnostics(diagEl, { error: String(error) });
+    renderDiagnostics(diagEl, { error: String(error), startup: handshakeDiagnostics.runtimeStartup });
   }
 }
 

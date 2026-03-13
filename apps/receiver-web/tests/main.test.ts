@@ -8,6 +8,7 @@ import {
   PROTOCOL_VERSION
 } from '../../../packages/contract/src/index.js';
 import { encodeFrame } from '../../../packages/protocol/src/index.js';
+import * as audioBrowser from '../../../packages/audio-browser/src/index.js';
 
 vi.mock('../../../packages/audio-browser/src/index.js', () => {
   return {
@@ -67,6 +68,7 @@ class FakeAudioContext {
 
 describe('receiver web shell', () => {
   beforeEach(() => {
+    vi.resetModules();
     vi.restoreAllMocks();
     document.body.innerHTML = '<div id="app"></div>';
     vi.stubGlobal('AudioContext', FakeAudioContext);
@@ -151,5 +153,23 @@ describe('receiver web shell', () => {
     document.querySelector<HTMLButtonElement>('#receiver-cancel')?.click();
     expect(document.querySelector('#receiver-state')?.textContent).toBe('cancelled');
     expect(document.querySelector('#receiver-diag')?.textContent ?? '').toContain('"sessionId": null');
+  });
+
+  it('includes staged startup diagnostics when worklet module registration fails', async () => {
+    vi.mocked(audioBrowser.registerWorklet).mockRejectedValue(new DOMException("Unable to load a worklet's module.", 'AbortError'));
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#receiver-start')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#receiver-state')?.textContent !== 'failed'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const diag = document.querySelector('#receiver-diag')?.textContent ?? '';
+    expect(document.querySelector('#receiver-state')?.textContent).toBe('failed');
+    expect(diag).toContain('"stage": "failed"');
+    expect(diag).toContain('"workletModuleCandidates"');
+    expect(diag).toContain('"workletModuleErrors"');
+    expect(diag).toContain('/meter_processor.js');
+    expect(diag).toContain('"lastError": "Error: Unable to register receiver worklet.');
   });
 });
