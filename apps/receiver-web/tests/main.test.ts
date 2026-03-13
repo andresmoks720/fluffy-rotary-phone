@@ -62,6 +62,7 @@ vi.mock('../../../packages/audio-browser/src/index.js', () => {
 class FakeAudioContext {
   static createdBufferLengths: number[] = [];
   sampleRate = 48000;
+  state: AudioContextState = 'suspended';
   audioWorklet = { addModule: async () => undefined };
   destination = {};
   createBuffer(_ch: number, len: number): AudioBuffer {
@@ -76,6 +77,9 @@ class FakeAudioContext {
       start: () => undefined,
       buffer: null
     } as unknown as AudioBufferSourceNode;
+  }
+  async resume(): Promise<void> {
+    this.state = 'running';
   }
   close(): Promise<void> { return Promise.resolve(); }
 }
