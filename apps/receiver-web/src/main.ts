@@ -666,9 +666,6 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
     ? ((data as { inputClassification?: string | null }).inputClassification ?? null)
     : null;
   const verboseEl = document.querySelector<HTMLElement>('#receiver-diag-verbose');
-  if (!verboseEl) {
-    return;
-  }
 
   const message = typeof data === 'object' && data !== null && 'message' in data ? (data as { message?: unknown }).message : null;
   const error = typeof data === 'object' && data !== null && 'error' in data ? (data as { error?: unknown }).error : null;
@@ -698,7 +695,9 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
   }
   receiverLastDiagnosticsUpdateMs = Date.now();
   el.textContent = statusSnapshot;
-  verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
+  if (verboseEl) {
+    verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
+  }
   renderReceiverLiveStats(document, levels, inputClassification, false, receiverLastDiagnosticsUpdateMs);
 }
 

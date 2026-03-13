@@ -271,10 +271,7 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
     ? ((data as { levels?: AudioLevelSummary | null }).levels ?? null)
     : null;
   const verboseEl = document.querySelector<HTMLElement>('#sender-diag-verbose');
-  if (!verboseEl) {
-    return;
-  }
-
+  
   const message = typeof data === 'object' && data !== null && 'message' in data ? (data as { message?: unknown }).message : null;
   const error = typeof data === 'object' && data !== null && 'error' in data ? (data as { error?: unknown }).error : null;
   const transferState = senderHarnessDiagnostics.transfer.state;
@@ -301,8 +298,11 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
     senderDiagnosticsPendingSnapshot = senderVerboseLogEntries.join('\n\n');
     return;
   }
+
   el.textContent = statusSnapshot;
-  verboseEl.textContent = senderVerboseLogEntries.join('\n\n');
+  if (verboseEl) {
+    verboseEl.textContent = senderVerboseLogEntries.join('\n\n');
+  }
   renderSenderLiveStats(document, levels);
 }
 
@@ -929,6 +929,40 @@ export function mountSenderShell(root: HTMLElement): void {
       <p>Decoded RX source: custom event <code>${SENDER_DECODED_RX_EVENT}</code></p>
       <p>Transfer RX frames accepted after handshake: <code>BURST_ACK</code>, <code>FINAL_OK</code>, <code>FINAL_BAD</code></p>
 
+      <section style="margin-bottom: 2rem; border: 1px solid #eee; padding: 1rem; border-radius: 8px; background: #fafafa;">
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem;">
+          <h2 style="margin: 0;">Live modem stats</h2>
+          <span id="sender-stats-live-badge" style="font-family: sans-serif; font-size: 0.75em; padding: 2px 8px; border-radius: 12px; background: #4caf50; color: #fff; font-weight: bold;">LIVE</span>
+        </div>
+
+        <div id="sender-diagnosis-group" style="margin-bottom: 1.5rem;">
+          <h3 id="sender-diagnosis-line" style="margin: 0; color: #333; font-size: 1.15em; min-height: 1.5em; font-family: sans-serif;">Ready to start</h3>
+        </div>
+
+        <div id="sender-input-meter" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; font-family: monospace;">
+          <span style="width: 120px; color: #666;">Input Level:</span>
+          <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc; border-radius: 2px;">
+            <div id="sender-input-meter-bar" style="height: 100%; background: #4caf50; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
+            <div id="sender-input-meter-peak" style="position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0%; transition: left 0.1s linear;"></div>
+          </div>
+          <span id="sender-input-meter-label" style="width: 120px; font-size: 0.9em;">Idle</span>
+        </div>
+
+        <div id="sender-transfer-status" style="display: flex; gap: 1rem; font-family: monospace; margin-bottom: 1rem; flex-wrap: wrap; background: #fff9f0; padding: 0.75rem; border: 1px solid #ffd1b3; border-radius: 4px; font-size: 0.9em;">
+          <div><strong style="color: #666;">State:</strong> <span id="ts-state">IDLE</span></div>
+          <div><strong style="color: #666;">Turn:</strong> <span id="ts-turn">sender</span></div>
+          <div><strong style="color: #666;">Session:</strong> <span id="ts-session">none</span></div>
+          <div><strong style="color: #666;">Elapsed:</strong> <span id="ts-elapsed">0.00</span>s</div>
+          <div><strong style="color: #666;">Goodput:</strong> <span id="ts-goodput">0</span>bps</div>
+          <div><strong style="color: #666;">Retries:</strong> <span id="ts-retries">0</span></div>
+        </div>
+
+        <details>
+          <summary style="cursor: pointer; font-weight: bold; margin-bottom: 0.5rem; font-size: 0.9em; color: #666;">Advanced details</summary>
+          <pre id="sender-live-stats" style="font-size: 0.85em; background: #f8f9fa; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; overflow-x: auto; margin-top: 0;">Waiting for sender runtime.</pre>
+        </details>
+      </section>
+
       <section>
         <label for="sender-file">Select file</label>
         <input id="sender-file" type="file" />
@@ -956,32 +990,6 @@ export function mountSenderShell(root: HTMLElement): void {
 
       ${debugControls}
 
-      <section>
-        <h2>Live modem stats</h2>
-        <h3 id="sender-diagnosis-line" style="margin-top: 0; color: #555; font-size: 1.1em; min-height: 1.5em;">Ready to start</h3>
-
-        <div id="sender-input-meter" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; font-family: monospace;">
-          <span style="width: 120px;">Input Level:</span>
-          <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc;">
-            <div id="sender-input-meter-bar" style="height: 100%; background: #4caf50; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
-            <div id="sender-input-meter-peak" style="position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0%; transition: left 0.1s linear;"></div>
-          </div>
-          <span id="sender-input-meter-label" style="width: 120px;">Idle</span>
-        </div>
-
-        <div id="sender-transfer-status" style="display: flex; gap: 1rem; font-family: monospace; margin-bottom: 1rem; flex-wrap: wrap; background: #fff9f0; padding: 0.5rem; border: 1px solid #ffd1b3; border-radius: 4px; font-size: 0.9em;">
-          <div><strong style="color: #666;">State:</strong> <span id="ts-state">IDLE</span></div>
-          <div><strong style="color: #666;">Turn:</strong> <span id="ts-turn">sender</span></div>
-          <div><strong style="color: #666;">Session:</strong> <span id="ts-session">none</span></div>
-          <div><strong style="color: #666;">Elapsed:</strong> <span id="ts-elapsed">0.00</span> s</div>
-          <div><strong style="color: #666;">Goodput:</strong> <span id="ts-goodput">0</span> bps</div>
-          <div><strong style="color: #666;">Retries:</strong> <span id="ts-retries">0</span></div>
-        </div>
-
-        <details>
-          <summary style="cursor: pointer; font-weight: bold; margin-bottom: 0.5rem;">Advanced details</summary>
-          <pre id="sender-live-stats" style="font-size: 0.85em; background: #f8f9fa; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; overflow-x: auto; margin-top: 0;">Waiting for sender runtime.</pre>
-        </details>
       </section>
 
       <section>
