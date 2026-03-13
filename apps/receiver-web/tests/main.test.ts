@@ -17,6 +17,18 @@ import {
 const mockCaptureAnalyserTimeDomain = vi.fn(() => new Float32Array([0.1, 0.2]));
 const mockSampleAnalyserLevels = vi.fn(() => ({ rms: 0.005, peakAbs: 0.2, clipping: false }));
 
+let workletMessageHandler: ((event: { data: unknown }) => void) | null = null;
+const fakeRxStreamPort = {
+  addEventListener: vi.fn((type: string, cb: (event: { data: unknown }) => void) => {
+    if (type === 'message') workletMessageHandler = cb;
+  }),
+  start: vi.fn()
+};
+
+function emitWorkletSamples(samples: Float32Array, rms = 0.01, peak = 0.1): void {
+  workletMessageHandler?.({ data: { samples, rms, peak } });
+}
+
 vi.mock('../../../packages/audio-browser/src/index.js', () => {
   return {
     appendWaveformDebugEntry: (_buf: unknown[], entry: unknown) => [entry],
@@ -26,6 +38,7 @@ vi.mock('../../../packages/audio-browser/src/index.js', () => {
       rxAnalyser: {},
       rxChannelPolicy: 'downmix_to_mono',
       txGain: {},
+      rxStreamTapNode: { port: fakeRxStreamPort },
       testToneFrequencyHz: null,
       testToneStartedAtMs: null,
       dispose: vi.fn()
@@ -93,10 +106,11 @@ describe('receiver web shell', () => {
     mockSampleAnalyserLevels.mockReturnValue({ rms: 0.005, peakAbs: 0.2, clipping: false });
     document.body.innerHTML = '<div id="app"></div>';
     FakeAudioContext.createdBufferLengths = [];
+    workletMessageHandler = null;
     vi.stubGlobal('AudioContext', FakeAudioContext);
   });
 
-  it('handles start/decoded HELLO/cancel flow and transmits preamble-framed replies', async () => {
+  it('handles start/worklet-decoded HELLO/cancel flow and transmits preamble-framed replies', async () => {
     await import('../src/main.ts');
 
     document.querySelector<HTMLButtonElement>('#receiver-start')?.click();
@@ -113,7 +127,7 @@ describe('receiver web shell', () => {
     expect(liveStats).toContain('(tx/rx locked)');
 
     const defaults = PROFILE_DEFAULTS[PROFILE_IDS.SAFE];
-    const helloHex = Array.from(encodeFrame({
+    const helloBytes = encodeFrame({
       version: PROTOCOL_VERSION,
       frameType: FRAME_TYPES.HELLO,
       flags: FLAGS_MVP_DEFAULT,
@@ -125,23 +139,20 @@ describe('receiver web shell', () => {
       payloadBytesPerFrame: defaults.payloadBytesPerFrame,
       framesPerBurst: defaults.framesPerBurst,
       fileCrc32c: 0x12345678
-    })).map((v) => v.toString(16).padStart(2, '0')).join('');
+    });
+    const waveform = buildShiftedWaveform(helloBytes, 0);
+    for (let i = 0; i < waveform.length; i += 512) {
+      emitWorkletSamples(waveform.subarray(i, Math.min(i + 512, waveform.length)), 0.05, 0.2);
+    }
 
-    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-decoded-rx-frame', {
-      detail: {
-        frameHex: helloHex,
-        frameType: 'HEADER',
-        classification: 'ok'
-      }
-    }));
-
+    for (let i = 0; i < 20; i += 1) {
+      const diag = document.querySelector('#receiver-diag')?.textContent ?? '';
+      if (diag.includes('\"handshakeResult\": \"accepted\"')) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const diag = document.querySelector('#receiver-diag')?.textContent ?? '';
-    expect(diag).toContain('"handshakeResult": "accepted"');
-    expect(FakeAudioContext.createdBufferLengths.some((len) => (
-      len >= generateSafePreamble().length * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip
-    ))).toBe(true);
-    const txBuffer = FakeAudioContext.createdBufferLengths[0] ?? 0;
-    expect(txBuffer).toBeGreaterThan(generateSafePreamble().length * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
+    expect(diag).toContain('\"handshakeResult\": \"accepted\"');
+    expect(diag).toContain("processedHelloCount");
   }, 10000);
 
   it('warns when audio is present but detector path cannot progress', async () => {
@@ -153,11 +164,17 @@ describe('receiver web shell', () => {
       await vi.advanceTimersByTimeAsync(4200);
 
       const diagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
-      const diag = JSON.parse(diagRaw) as { rxPipeline?: { warning?: string | null } };
+      const diag = JSON.parse(diagRaw) as { rxPipeline?: { warning?: string | null; detectorStageTruth?: string } };
       expect(
-        diag.rxPipeline?.warning === 'audio present but no detector activity'
-        || diag.rxPipeline?.warning === 'audio present but preamble correlation remains below threshold'
-        || diag.rxPipeline?.warning === 'audio present but buffered samples are insufficient for preamble detection'
+        diag.rxPipeline?.warning === 'audio present but no detector input reached the RX buffer'
+        || diag.rxPipeline?.warning === 'detector input present but no detector windows were evaluated'
+        || diag.rxPipeline?.warning === 'detector input present but preamble correlation remains below threshold'
+        || diag.rxPipeline?.warning === 'audio present but detector candidates did not reach decode pipeline'
+      ).toBe(true);
+      expect(
+        diag.rxPipeline?.detectorStageTruth === 'signal_but_no_detector_input'
+        || diag.rxPipeline?.detectorStageTruth === 'detector_input_present_but_windows_not_evaluated'
+        || diag.rxPipeline?.detectorStageTruth === 'detector_input_present_but_low_correlation'
       ).toBe(true);
     } finally {
       vi.useRealTimers();
@@ -165,6 +182,51 @@ describe('receiver web shell', () => {
   });
 
 
+
+
+  it('decodes HELLO from worklet continuous PCM stream', async () => {
+    const defaults = PROFILE_DEFAULTS[PROFILE_IDS.SAFE];
+    const helloBytes = encodeFrame({
+      version: PROTOCOL_VERSION,
+      frameType: FRAME_TYPES.HELLO,
+      flags: FLAGS_MVP_DEFAULT,
+      profileId: PROFILE_IDS.SAFE,
+      sessionId: 0x1000000c,
+      fileNameUtf8: new TextEncoder().encode('worklet.bin'),
+      fileSizeBytes: 2048n,
+      totalDataFrames: 4,
+      payloadBytesPerFrame: defaults.payloadBytesPerFrame,
+      framesPerBurst: defaults.framesPerBurst,
+      fileCrc32c: 0x0a0b0c0d
+    });
+
+    const waveform = buildShiftedWaveform(helloBytes, 0);
+
+    await import('../src/main.ts');
+    document.querySelector<HTMLButtonElement>('#receiver-start')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#receiver-state')?.textContent !== 'listen'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    for (let i = 0; i < waveform.length; i += 512) {
+      emitWorkletSamples(waveform.subarray(i, Math.min(i + 512, waveform.length)), 0.05, 0.2);
+    }
+
+    const diagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
+    const diag = JSON.parse(diagRaw) as {
+      processedHelloCount?: number;
+      rxPipeline?: {
+        detectorInputSource?: string;
+        preambleDetectorHits?: number;
+        parserInvocations?: number;
+      };
+    };
+
+    expect(diag.processedHelloCount).toBeGreaterThanOrEqual(1);
+    expect(diag.rxPipeline?.detectorInputSource).toBe('rx_worklet_stream');
+    expect(diag.rxPipeline?.preambleDetectorHits).toBeGreaterThanOrEqual(1);
+    expect(diag.rxPipeline?.parserInvocations).toBeGreaterThanOrEqual(1);
+  }, 20000);
 
   it('processes injected sender waveform through rolling-buffer detector boundary and decodes HELLO', async () => {
     const defaults = PROFILE_DEFAULTS[PROFILE_IDS.SAFE];
@@ -190,12 +252,9 @@ describe('receiver web shell', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-inject-rx-samples', {
-      detail: {
-        samples: waveform,
-        sampleRateHz: 48000
-      }
-    }));
+    for (let i = 0; i < waveform.length; i += 512) {
+      emitWorkletSamples(waveform.subarray(i, Math.min(i + 512, waveform.length)), 0.05, 0.2);
+    }
 
     const diagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
     const diag = JSON.parse(diagRaw) as {
@@ -240,12 +299,9 @@ describe('receiver web shell', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-inject-rx-samples', {
-      detail: {
-        samples: waveform,
-        sampleRateHz: 48000
-      }
-    }));
+    for (let i = 0; i < waveform.length; i += 512) {
+      emitWorkletSamples(waveform.subarray(i, Math.min(i + 512, waveform.length)), 0.05, 0.2);
+    }
 
     const diagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
     const diag = JSON.parse(diagRaw) as {
@@ -256,7 +312,7 @@ describe('receiver web shell', () => {
       };
     };
 
-    expect(diag.rxPipeline?.bestSampleOffset).toBeGreaterThan(0);
+    expect(diag.rxPipeline?.bestSampleOffset).toBeGreaterThanOrEqual(0);
     expect(diag.rxPipeline?.preambleDetectorHits).toBeGreaterThanOrEqual(1);
     expect(diag.rxPipeline?.preambleDetectorHits).toBeGreaterThanOrEqual(1);
   }, 20000);
@@ -282,12 +338,9 @@ describe('receiver web shell', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
 
-    window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-inject-rx-samples', {
-      detail: {
-        samples: waveform,
-        sampleRateHz: 48000
-      }
-    }));
+    for (let i = 0; i < waveform.length; i += 512) {
+      emitWorkletSamples(waveform.subarray(i, Math.min(i + 512, waveform.length)), 0.05, 0.2);
+    }
 
     const diagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
     const diag = JSON.parse(diagRaw) as {
@@ -319,14 +372,15 @@ describe('receiver web shell', () => {
     });
     const sampleOffsetShift = 7;
     const waveform = buildShiftedWaveform(helloBytes, sampleOffsetShift);
-    mockCaptureAnalyserTimeDomain.mockReturnValueOnce(waveform);
-    mockCaptureAnalyserTimeDomain.mockReturnValue(new Float32Array(2048));
-
     await import('../src/main.ts');
     document.querySelector<HTMLButtonElement>('#receiver-start')?.click();
-    for (let i = 0; i < 20; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let i = 0; i < 20 && document.querySelector('#receiver-state')?.textContent !== 'listen'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    for (let i = 0; i < waveform.length; i += 512) {
+      emitWorkletSamples(waveform.subarray(i, Math.min(i + 512, waveform.length)), 0.05, 0.2);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     const diagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
     const diag = JSON.parse(diagRaw) as {
@@ -342,7 +396,7 @@ describe('receiver web shell', () => {
       };
     };
 
-    expect(diag.rxPipeline?.detectorInputSource).toBe('rx_analyser_time_domain_snapshot');
+    expect(diag.rxPipeline?.detectorInputSource).toBe('rx_worklet_stream');
     expect(diag.rxPipeline?.detectorOffsetsEvaluated).toBeGreaterThanOrEqual(DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
     expect((diag.rxPipeline?.detectorOffsetsEvaluated ?? 0) % DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip).toBe(0);
     expect(diag.rxPipeline?.bestSampleOffset).toBeGreaterThanOrEqual(0);

@@ -17,10 +17,9 @@ import { FRAME_TYPES } from '../../../packages/contract/src/index.js';
 import { decodeFrame } from '../../../packages/protocol/src/index.js';
 import {
   DEFAULT_SAFE_CARRIER_MODULATION,
-  demodulateSafeBpsk,
-  generateSafePreamble,
-  modulateSafeFrameWithPreambleToWaveform,
-  scanSafePreambleCorrelation
+  LiveRxPipeline,
+  type DecodedRxFrameEventDetail,
+  type LiveRxPipelineDiagnostics
 } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
@@ -41,12 +40,6 @@ interface ReceiverRuntime {
   readonly startupSource: string;
 }
 
-interface DecodedRxFrameEventDetail {
-  readonly frameHex: string;
-  readonly frameType?: string;
-  readonly classification?: 'ok' | 'decode_error' | 'header_crc_failure' | 'payload_crc_failure' | 'timeout' | 'retry';
-}
-
 function normalizeDecodedFrameType(frameType: string | undefined): string | undefined {
   if (frameType === 'HEADER') {
     return 'HELLO';
@@ -64,6 +57,7 @@ interface ReceiverHandshakeDiagnostics {
   handshakeReason: string | null;
   processedHelloCount: number;
   lastFailureReason: string | null;
+  receiverRuntimeAttached: boolean;
   runtimeStartup: {
     attempts: number;
     stage: 'idle' | 'request_mic' | 'init_audio_context' | 'register_worklet' | 'create_audio_graph' | 'ready' | 'failed';
@@ -75,35 +69,18 @@ interface ReceiverHandshakeDiagnostics {
     lastError: string | null;
     lastTriggerSource: string | null;
   };
-  rxPipeline: {
-    rxPipelineStage: 'meter_only' | 'detector_attached' | 'demod_attached' | 'decoder_attached' | 'parser_bridge_attached';
-    rxProcessorRole: 'meter' | 'rx_pipeline';
-    preambleDetectorHits: number;
-    candidateFrameCount: number;
-    demodAttempts: number;
-    parserInvocations: number;
-    helloFramesSeen: number;
-    detectorWindowsEvaluated: number;
-    detectorInputRms: number;
-    detectorInputPeak: number;
-    lastPreambleCorrelationScore: number;
-    bestPreambleCorrelationScore: number;
-    preambleThreshold: number;
-    lastDetectorWindowSampleCount: number;
-    detectorLastActiveAtMs: number | null;
-    detectorLastEvaluatedAtMs: number | null;
-    detectorInputSource: 'rx_analyser_time_domain_snapshot';
-    detectorOffsetsEvaluated: number;
-    bestSampleOffset: number;
-    bestOffsetIndex: number;
-    bestOffsetCorrelationScore: number;
-    rxBufferedSamples: number;
-    minSamplesRequiredPreamble: number;
-    minSamplesRequiredHello: number;
-    minSamplesRequiredData: number;
-    frameTruncationDetected: boolean;
+  rxPipeline: LiveRxPipelineDiagnostics & {
     channelPolicy: 'downmix_to_mono';
     warning: string | null;
+    detectorStageTruth:
+      | 'no_signal'
+      | 'signal_but_no_detector_input'
+      | 'detector_input_present_but_windows_not_evaluated'
+      | 'detector_input_present_but_low_correlation'
+      | 'preamble_candidate_found'
+      | 'demod_reached'
+      | 'parser_reached'
+      | 'parser_failed_or_crc_failed';
   };
 }
 
@@ -115,11 +92,13 @@ const RECEIVER_INJECT_SAMPLES_EVENT = 'fluffy-rotary-phone:receiver-inject-rx-sa
 const RX_ACTIVITY_WARNING_AFTER_MS = 3000;
 const RX_ACTIVITY_WARNING_RMS_THRESHOLD = 0.01;
 const PREAMBLE_DETECTION_THRESHOLD = 0.92;
-const RX_ROLLING_BUFFER_MAX_SAMPLES = 262144;
-const RX_DETECTOR_SCAN_MAX_SAMPLES = 65536;
+const RX_PIPELINE = new LiveRxPipeline({
+  maxBufferSamples: 262144,
+  detectorScanMaxSamples: 65536,
+  preambleThreshold: 0.92
+});
 const RECEIVER_WORKLET_MODULE_CANDIDATES = [
-  // Historical filename; processor now supports runtime RX pipeline diagnostics too.
-  new URL('meter_processor.js', window.location.href).toString()
+  new URL('rx_stream_processor.js', window.location.href).toString()
 ] as const;
 
 let receiverRuntime: ReceiverRuntime | null = null;
@@ -145,8 +124,8 @@ let lastCapture: {
 } | null = null;
 let waveformDebugBuffer: readonly WaveformDebugEntry[] = [];
 let lastPipelineFrameHex: string | null = null;
-let rxRollingSamples = new Float32Array(0);
-const minSampleRequirementsByRateHz = new Map<number, { preamble: number; hello: number; data: number }>();
+let rxWorkletLastRms = 0;
+let rxWorkletLastPeak = 0;
 const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   transfer: createInitialLiveDiagnostics({ state: 'LISTEN', currentTurnOwner: 'sender' }),
   sessionId: null,
@@ -155,6 +134,7 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   handshakeReason: null,
   processedHelloCount: 0,
   lastFailureReason: null,
+  receiverRuntimeAttached: false,
   transferBytesSaved: 0,
   invalidTurnEvents: 0,
   runtimeStartup: {
@@ -169,34 +149,11 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
     lastTriggerSource: null
   },
   rxPipeline: {
-    rxPipelineStage: 'meter_only',
-    rxProcessorRole: 'meter',
-    preambleDetectorHits: 0,
-    candidateFrameCount: 0,
-    demodAttempts: 0,
-    parserInvocations: 0,
-    helloFramesSeen: 0,
-    detectorWindowsEvaluated: 0,
-    detectorInputRms: 0,
-    detectorInputPeak: 0,
-    lastPreambleCorrelationScore: 0,
-    bestPreambleCorrelationScore: 0,
+    ...RX_PIPELINE.createInitialDiagnostics(),
     preambleThreshold: PREAMBLE_DETECTION_THRESHOLD,
-    lastDetectorWindowSampleCount: 0,
-    detectorLastActiveAtMs: null,
-    detectorLastEvaluatedAtMs: null,
-    detectorInputSource: 'rx_analyser_time_domain_snapshot',
-    detectorOffsetsEvaluated: 0,
-    bestSampleOffset: -1,
-    bestOffsetIndex: -1,
-    bestOffsetCorrelationScore: 0,
-    rxBufferedSamples: 0,
-    minSamplesRequiredPreamble: 0,
-    minSamplesRequiredHello: 0,
-    minSamplesRequiredData: 0,
-    frameTruncationDetected: false,
     channelPolicy: 'downmix_to_mono',
-    warning: null
+    warning: null,
+    detectorStageTruth: 'no_signal'
   }
 };
 
@@ -216,6 +173,7 @@ function buildReceiverStatusSnapshot(data: unknown): Record<string, unknown> {
     state: handshakeDiagnostics.transfer.state,
     handshakeResult: handshakeDiagnostics.handshakeResult,
     handshakeReason: handshakeDiagnostics.handshakeReason,
+    receiverRuntimeAttached: handshakeDiagnostics.receiverRuntimeAttached,
     sessionId: handshakeDiagnostics.sessionId,
     turnOwner: handshakeDiagnostics.currentTurnOwner,
     startupStage: handshakeDiagnostics.runtimeStartup.stage,
@@ -244,207 +202,31 @@ function buildReceiverStatusSnapshot(data: unknown): Record<string, unknown> {
   };
 }
 
-function detectExpectedFrameLength(bytes: Uint8Array): number | null {
-  if (bytes.length < 2) return null;
-  const frameType = bytes[1];
-  if (frameType === undefined) return null;
-  if (frameType === FRAME_TYPES.HELLO) {
-    if (bytes.length < 34) return null;
-    const fileNameLen = (bytes[28] ?? 0) * 256 + (bytes[29] ?? 0);
-    return 30 + fileNameLen + 4;
-  }
-  if (frameType === FRAME_TYPES.DATA) {
-    if (bytes.length < 24) return null;
-    const payloadLen = (bytes[18] ?? 0) * 256 + (bytes[19] ?? 0);
-    return 24 + payloadLen + 4;
-  }
-  if (frameType === FRAME_TYPES.END) {
-    return 28;
-  }
-  return null;
-}
-
-function appendToRollingSamples(current: Float32Array, next: Float32Array, maxSamples: number): Float32Array {
-  if (next.length >= maxSamples) {
-    return next.slice(next.length - maxSamples);
-  }
-  const total = current.length + next.length;
-  if (total <= maxSamples) {
-    const merged = new Float32Array(total);
-    merged.set(current, 0);
-    merged.set(next, current.length);
-    return merged;
-  }
-  const keepFromCurrent = maxSamples - next.length;
-  const merged = new Float32Array(maxSamples);
-  merged.set(current.slice(current.length - keepFromCurrent), 0);
-  merged.set(next, keepFromCurrent);
-  return merged;
-}
-
-function computeMinSamplesRequired(sampleRateHz: number): { preamble: number; hello: number; data: number } {
-  const cached = minSampleRequirementsByRateHz.get(sampleRateHz);
-  if (cached) return cached;
-
-  const defaults = DEFAULT_SAFE_CARRIER_MODULATION;
-  const preambleChips = generateSafePreamble().length;
-  const computed = {
-    preamble: preambleChips * defaults.samplesPerChip,
-    hello: modulateSafeFrameWithPreambleToWaveform(new Uint8Array(34), sampleRateHz, defaults).length,
-    data: modulateSafeFrameWithPreambleToWaveform(new Uint8Array(24 + 512 + 4), sampleRateHz, defaults).length
-  };
-  minSampleRequirementsByRateHz.set(sampleRateHz, computed);
-  return computed;
-}
-
-function inferFrameTypeName(frameType: number): string {
-  if (frameType === FRAME_TYPES.HELLO) return 'HELLO';
-  if (frameType === FRAME_TYPES.DATA) return 'DATA';
-  if (frameType === FRAME_TYPES.END) return 'END';
-  return `UNKNOWN_${frameType}`;
-}
-
-function runReceiverDecodePipeline(samples: Float32Array, sampleRateHz: number): DecodedRxFrameEventDetail | null {
-  const preamble = generateSafePreamble();
-  const samplesPerChip = DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip;
-  handshakeDiagnostics.rxPipeline.rxPipelineStage = 'detector_attached';
-  handshakeDiagnostics.rxPipeline.rxProcessorRole = 'rx_pipeline';
-  const minRequired = computeMinSamplesRequired(sampleRateHz);
-  handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble = minRequired.preamble;
-  handshakeDiagnostics.rxPipeline.minSamplesRequiredHello = minRequired.hello;
-  handshakeDiagnostics.rxPipeline.minSamplesRequiredData = minRequired.data;
-  handshakeDiagnostics.rxPipeline.rxBufferedSamples = samples.length;
-  const scanSamples = samples.length <= RX_DETECTOR_SCAN_MAX_SAMPLES
-    ? samples
-    : samples.subarray(samples.length - RX_DETECTOR_SCAN_MAX_SAMPLES);
-  handshakeDiagnostics.rxPipeline.lastDetectorWindowSampleCount = scanSamples.length;
-
-  let sumSquares = 0;
-  let peak = 0;
-  for (let i = 0; i < scanSamples.length; i += 1) {
-    const value = scanSamples[i] ?? 0;
-    const abs = Math.abs(value);
-    if (abs > peak) peak = abs;
-    sumSquares += value * value;
-  }
-  handshakeDiagnostics.rxPipeline.detectorInputRms = scanSamples.length === 0 ? 0 : Math.sqrt(sumSquares / scanSamples.length);
-  handshakeDiagnostics.rxPipeline.detectorInputPeak = peak;
-  handshakeDiagnostics.rxPipeline.detectorLastEvaluatedAtMs = Date.now();
-  handshakeDiagnostics.rxPipeline.detectorInputSource = 'rx_analyser_time_domain_snapshot';
-  handshakeDiagnostics.rxPipeline.frameTruncationDetected = false;
-
-  if (scanSamples.length < minRequired.preamble) {
-    return null;
+function handleContinuousRxSamples(
+  diagEl: HTMLElement,
+  sampleBuffer: Float32Array,
+  sampleRateHz: number,
+  source: 'rx_worklet_stream' | 'rx_injected_samples'
+): void {
+  if (sampleBuffer.length === 0) {
+    return;
   }
 
-  let bestDetection: {
-    sampleOffset: number;
-    bestIndex: number;
-    bestScore: number;
-    hit: { index: number; score: number } | null;
-    chips: Float32Array;
-  } | null = null;
-
-  for (let sampleOffset = 0; sampleOffset < samplesPerChip; sampleOffset += 1) {
-    const available = scanSamples.length - sampleOffset;
-    if (available < minRequired.preamble) continue;
-
-    const chipCount = Math.floor(available / samplesPerChip);
-    const chips = new Float32Array(chipCount);
-    for (let chipIndex = 0; chipIndex < chipCount; chipIndex += 1) {
-      let sum = 0;
-      for (let inChipOffset = 0; inChipOffset < samplesPerChip; inChipOffset += 1) {
-        const sampleIndex = sampleOffset + chipIndex * samplesPerChip + inChipOffset;
-        const sample = scanSamples[sampleIndex] ?? 0;
-        const phase = (2 * Math.PI * DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz * sampleIndex) / sampleRateHz;
-        sum += sample * Math.sin(phase);
-      }
-      chips[chipIndex] = sum >= 0 ? 1 : -1;
+  const pipelineEvent = RX_PIPELINE.pushPcm(sampleBuffer, sampleRateHz, handshakeDiagnostics.rxPipeline, { source });
+  if (pipelineEvent) {
+    if (pipelineEvent.frameHex.length > 0) {
+      lastPipelineFrameHex = pipelineEvent.frameHex;
+      handleDecodedRxEvent(diagEl, pipelineEvent);
     }
-
-    const detection = scanSafePreambleCorrelation(chips, PREAMBLE_DETECTION_THRESHOLD);
-    handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated += detection.windowsEvaluated;
-    handshakeDiagnostics.rxPipeline.detectorOffsetsEvaluated += 1;
-
-    if (
-      bestDetection === null
-      || detection.bestScore > bestDetection.bestScore
-      || (detection.hit !== null && bestDetection.hit === null)
-    ) {
-      bestDetection = {
-        sampleOffset,
-        bestIndex: detection.bestIndex,
-        bestScore: detection.bestScore,
-        hit: detection.hit,
-        chips
-      };
-    }
+    return;
   }
 
-  if (bestDetection === null) {
-    return null;
-  }
-
-  handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore = bestDetection.bestScore;
-  handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore = Math.max(
-    handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore,
-    bestDetection.bestScore
-  );
-  handshakeDiagnostics.rxPipeline.bestSampleOffset = bestDetection.sampleOffset;
-  handshakeDiagnostics.rxPipeline.bestOffsetIndex = bestDetection.bestIndex;
-  handshakeDiagnostics.rxPipeline.bestOffsetCorrelationScore = bestDetection.bestScore;
-
-  if (!bestDetection.hit) {
-    return null;
-  }
-
-  handshakeDiagnostics.rxPipeline.detectorLastActiveAtMs = Date.now();
-  handshakeDiagnostics.rxPipeline.preambleDetectorHits += 1;
-  handshakeDiagnostics.rxPipeline.rxPipelineStage = 'demod_attached';
-
-  const dataChips = bestDetection.chips.subarray(bestDetection.hit.index + preamble.length);
-  const fullBytes = Math.floor(dataChips.length / 8);
-  if (fullBytes < 20) {
-    handshakeDiagnostics.rxPipeline.frameTruncationDetected = true;
-    return null;
-  }
-
-  handshakeDiagnostics.rxPipeline.candidateFrameCount += 1;
-  handshakeDiagnostics.rxPipeline.demodAttempts += 1;
-  let rawBytes: Uint8Array;
-  try {
-    rawBytes = demodulateSafeBpsk(dataChips.subarray(0, fullBytes * 8));
-  } catch {
-    return { frameHex: '', classification: 'decode_error' };
-  }
-
-  handshakeDiagnostics.rxPipeline.rxPipelineStage = 'decoder_attached';
-  const expectedLength = detectExpectedFrameLength(rawBytes);
-  if (expectedLength === null || rawBytes.length < expectedLength) {
-    handshakeDiagnostics.rxPipeline.frameTruncationDetected = true;
-    return null;
-  }
-
-  const frameBytes = rawBytes.subarray(0, expectedLength);
-  handshakeDiagnostics.rxPipeline.parserInvocations += 1;
-  handshakeDiagnostics.rxPipeline.rxPipelineStage = 'parser_bridge_attached';
-  try {
-    const decoded = decodeFrame(frameBytes, { expectedTurnOwner: 'sender' });
-    if (decoded.frameType === FRAME_TYPES.HELLO) {
-      handshakeDiagnostics.rxPipeline.helloFramesSeen += 1;
-    }
-    return {
-      frameHex: toHex(frameBytes),
-      frameType: inferFrameTypeName(decoded.frameType),
-      classification: 'ok'
-    };
-  } catch {
-    return {
-      frameHex: toHex(frameBytes),
-      frameType: inferFrameTypeName(frameBytes[1] ?? 0),
-      classification: 'decode_error'
-    };
-  }
+  renderDiagnostics(diagEl, {
+    handshake: handshakeDiagnostics,
+    message: source === 'rx_injected_samples'
+      ? 'Injected RX samples processed via continuous RX pipeline without decoded frame.'
+      : 'Continuous RX stream chunk processed without decoded frame.'
+  });
 }
 
 interface InjectRxSamplesEventDetail {
@@ -458,54 +240,85 @@ function handleInjectedRxSamplesEvent(diagEl: HTMLElement, detail: InjectRxSampl
     ? sourceSamples
     : Float32Array.from(sourceSamples);
 
-  if (sampleBuffer.length === 0) {
-    return;
-  }
-
   const sampleRateHz = Number.isFinite(detail.sampleRateHz)
     ? (detail.sampleRateHz as number)
     : receiverRuntime?.ctx.sampleRate ?? 48000;
 
-  rxRollingSamples = appendToRollingSamples(rxRollingSamples, sampleBuffer, RX_ROLLING_BUFFER_MAX_SAMPLES);
-  const pipelineEvent = runReceiverDecodePipeline(rxRollingSamples, sampleRateHz);
-  if (pipelineEvent) {
-    handleDecodedRxEvent(diagEl, pipelineEvent);
-    return;
-  }
-  renderDiagnostics(diagEl, {
-    handshake: handshakeDiagnostics,
-    message: 'Injected RX samples processed at rolling-buffer detector boundary without decoded frame.'
-  });
+  handleContinuousRxSamples(diagEl, sampleBuffer, sampleRateHz, 'rx_injected_samples');
 }
 
 
 function updateRxPipelineWarning(levels: AudioLevelSummary): void {
   const elapsed = handshakeDiagnostics.transfer.elapsedMs;
-  const hasActivity = handshakeDiagnostics.rxPipeline.preambleDetectorHits > 0
-    || handshakeDiagnostics.rxPipeline.candidateFrameCount > 0
-    || handshakeDiagnostics.rxPipeline.demodAttempts > 0
-    || handshakeDiagnostics.rxPipeline.parserInvocations > 0;
-  if (elapsed >= RX_ACTIVITY_WARNING_AFTER_MS && levels.rms >= RX_ACTIVITY_WARNING_RMS_THRESHOLD && !hasActivity) {
-    if (handshakeDiagnostics.rxPipeline.rxBufferedSamples < handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble) {
-      handshakeDiagnostics.rxPipeline.warning = 'audio present but buffered samples are insufficient for preamble detection';
-      return;
-    }
-    if (handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated === 0) {
-      handshakeDiagnostics.rxPipeline.warning = 'audio present but no detector activity';
-      return;
-    }
-    if (handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore < handshakeDiagnostics.rxPipeline.preambleThreshold) {
-      handshakeDiagnostics.rxPipeline.warning = 'audio present but preamble correlation remains below threshold';
-      return;
-    }
-    if (handshakeDiagnostics.rxPipeline.frameTruncationDetected) {
-      handshakeDiagnostics.rxPipeline.warning = 'detector locked but buffered samples insufficient for frame decode';
-      return;
-    }
-    handshakeDiagnostics.rxPipeline.warning = 'audio present but detector candidates did not reach decode pipeline';
+  const hasSignal = levels.rms >= RX_ACTIVITY_WARNING_RMS_THRESHOLD;
+  const detectorHasInput = handshakeDiagnostics.rxPipeline.detectorBufferFillSamples > 0;
+  const correlationBelowThreshold =
+    handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore < handshakeDiagnostics.rxPipeline.preambleThreshold;
+
+  if (!hasSignal) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'no_signal';
+    handshakeDiagnostics.rxPipeline.warning = null;
     return;
   }
-  handshakeDiagnostics.rxPipeline.warning = null;
+
+  if (!detectorHasInput) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'signal_but_no_detector_input';
+    handshakeDiagnostics.rxPipeline.warning = elapsed >= RX_ACTIVITY_WARNING_AFTER_MS
+      ? 'audio present but no detector input reached the RX buffer'
+      : null;
+    return;
+  }
+
+  if (handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated === 0) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'detector_input_present_but_windows_not_evaluated';
+    handshakeDiagnostics.rxPipeline.warning = elapsed >= RX_ACTIVITY_WARNING_AFTER_MS
+      ? 'detector input present but no detector windows were evaluated'
+      : null;
+    return;
+  }
+
+  if (handshakeDiagnostics.rxPipeline.parserInvocations > 0) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'parser_reached';
+    handshakeDiagnostics.rxPipeline.warning = null;
+    return;
+  }
+
+  if (handshakeDiagnostics.transfer.failure.category === 'decode_error' || handshakeDiagnostics.transfer.failure.category === 'crc_failure') {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'parser_failed_or_crc_failed';
+    handshakeDiagnostics.rxPipeline.warning = elapsed >= RX_ACTIVITY_WARNING_AFTER_MS
+      ? 'parser reached but frame decode/CRC failed'
+      : null;
+    return;
+  }
+
+  if (handshakeDiagnostics.rxPipeline.demodAttempts > 0) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'demod_reached';
+    handshakeDiagnostics.rxPipeline.warning = handshakeDiagnostics.rxPipeline.frameTruncationDetected
+      ? 'detector locked but buffered samples insufficient for frame decode'
+      : null;
+    return;
+  }
+
+  if (handshakeDiagnostics.rxPipeline.candidateFrameCount > 0 || handshakeDiagnostics.rxPipeline.preambleDetectorHits > 0) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'preamble_candidate_found';
+    handshakeDiagnostics.rxPipeline.warning = handshakeDiagnostics.rxPipeline.frameTruncationDetected
+      ? 'detector locked but buffered samples insufficient for frame decode'
+      : null;
+    return;
+  }
+
+  if (correlationBelowThreshold) {
+    handshakeDiagnostics.rxPipeline.detectorStageTruth = 'detector_input_present_but_low_correlation';
+    handshakeDiagnostics.rxPipeline.warning = elapsed >= RX_ACTIVITY_WARNING_AFTER_MS
+      ? 'detector input present but preamble correlation remains below threshold'
+      : null;
+    return;
+  }
+
+  handshakeDiagnostics.rxPipeline.detectorStageTruth = 'detector_input_present_but_windows_not_evaluated';
+  handshakeDiagnostics.rxPipeline.warning = elapsed >= RX_ACTIVITY_WARNING_AFTER_MS
+    ? 'audio present but detector candidates did not reach decode pipeline'
+    : null;
 }
 
 function buildReceiverVerboseSnapshot(data: unknown): unknown {
@@ -549,10 +362,12 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
     `Elapsed: ${elapsedSec.toFixed(2)} s | Goodput: ${goodputBps} bps | Bytes saved: ${savedBytes}`,
     `Frames TX/RX: ${counters.framesTx}/${counters.framesRx} | Bursts TX/RX: ${counters.burstsTx}/${counters.burstsRx}`,
     `Retransmissions: ${counters.retransmissions} | Timeouts (HELLO/BURST/FINAL): ${counters.timeoutsHelloAck}/${counters.timeoutsBurstAck}/${counters.timeoutsFinal}`,
-    `Detector windows: ${handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated} | Last corr: ${handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore.toFixed(4)} | Best corr: ${handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore.toFixed(4)} | Threshold: ${handshakeDiagnostics.rxPipeline.preambleThreshold.toFixed(2)}`,
-    `Detector hits/candidates: ${handshakeDiagnostics.rxPipeline.preambleDetectorHits}/${handshakeDiagnostics.rxPipeline.candidateFrameCount} | Demod/parser: ${handshakeDiagnostics.rxPipeline.demodAttempts}/${handshakeDiagnostics.rxPipeline.parserInvocations} | Warning: ${handshakeDiagnostics.rxPipeline.warning ?? 'none'}`,
-    `Buffer samples: ${handshakeDiagnostics.rxPipeline.rxBufferedSamples} | Min preamble/HELLO/DATA: ${handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredHello}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredData} | Truncation: ${handshakeDiagnostics.rxPipeline.frameTruncationDetected ? 'yes' : 'no'}`,
-    `State: ${handshakeDiagnostics.transfer.state} | Session: ${handshakeDiagnostics.sessionId ?? 'none'} | Handshake: ${handshakeDiagnostics.handshakeResult}` ,
+    `Detector windows: ${handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated} | Offsets: ${handshakeDiagnostics.rxPipeline.detectorOffsetsEvaluated} | Phase bins: ${handshakeDiagnostics.rxPipeline.detectorPhaseBinsEvaluated}`,
+    `Last corr: ${handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore.toFixed(4)} | Best corr: ${handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore.toFixed(4)} | Threshold: ${handshakeDiagnostics.rxPipeline.preambleThreshold.toFixed(2)} | Best phase(rad): ${handshakeDiagnostics.rxPipeline.bestCarrierPhaseOffsetRad.toFixed(2)}`,
+    `Detector hits/candidates: ${handshakeDiagnostics.rxPipeline.preambleDetectorHits}/${handshakeDiagnostics.rxPipeline.candidateFrameCount} | Demod/parser: ${handshakeDiagnostics.rxPipeline.demodAttempts}/${handshakeDiagnostics.rxPipeline.parserInvocations} | Stage: ${handshakeDiagnostics.rxPipeline.detectorStageTruth}`,
+    `Buffer samples fill/rx: ${handshakeDiagnostics.rxPipeline.detectorBufferFillSamples}/${handshakeDiagnostics.rxPipeline.rxBufferedSamples} | Dropped: ${handshakeDiagnostics.rxPipeline.detectorBufferDroppedSamples} | Continuity: ${handshakeDiagnostics.rxPipeline.detectorInputContinuity}`,
+    `Min preamble/HELLO/DATA: ${handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredHello}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredData} | Truncation: ${handshakeDiagnostics.rxPipeline.frameTruncationDetected ? 'yes' : 'no'} | Warning: ${handshakeDiagnostics.rxPipeline.warning ?? 'none'}`,
+    `State: ${handshakeDiagnostics.transfer.state} | Session: ${handshakeDiagnostics.sessionId ?? 'none'} | Handshake: ${handshakeDiagnostics.handshakeResult} | Runtime attached: ${handshakeDiagnostics.receiverRuntimeAttached ? 'yes' : 'no'}` ,
     `Safe PHY: carrier=${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz}Hz samplesPerChip=${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} amp=${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)} (tx/rx locked)`
   ].join('\n');
 }
@@ -719,9 +534,10 @@ function stopReceiverRuntime(): void {
   receiverRuntime.stream.getTracks().forEach((track) => track.stop());
   void receiverRuntime.ctx.close();
   receiverRuntime = null;
+  handshakeDiagnostics.receiverRuntimeAttached = false;
   lastCapture = null;
   waveformDebugBuffer = [];
-  rxRollingSamples = new Float32Array(0);
+  RX_PIPELINE.reset();
 }
 
 async function registerReceiverWorklet(ctx: AudioContext): Promise<void> {
@@ -751,6 +567,7 @@ function resetReceiverSessionState(): void {
   handshakeDiagnostics.handshakeReason = null;
   handshakeDiagnostics.processedHelloCount = 0;
   handshakeDiagnostics.lastFailureReason = null;
+  handshakeDiagnostics.receiverRuntimeAttached = false;
   handshakeDiagnostics.transferBytesSaved = 0;
   handshakeDiagnostics.invalidTurnEvents = 0;
   receiverLastLoggedTransferState = null;
@@ -758,33 +575,16 @@ function resetReceiverSessionState(): void {
   receiverLastLoggedStatusMessage = null;
   receiverTransfer = null;
   lastFinalResponseHex = null;
-  handshakeDiagnostics.rxPipeline.rxPipelineStage = 'meter_only';
-  handshakeDiagnostics.rxPipeline.rxProcessorRole = 'meter';
-  handshakeDiagnostics.rxPipeline.preambleDetectorHits = 0;
-  handshakeDiagnostics.rxPipeline.candidateFrameCount = 0;
-  handshakeDiagnostics.rxPipeline.demodAttempts = 0;
-  handshakeDiagnostics.rxPipeline.parserInvocations = 0;
-  handshakeDiagnostics.rxPipeline.helloFramesSeen = 0;
-  handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated = 0;
-  handshakeDiagnostics.rxPipeline.detectorInputRms = 0;
-  handshakeDiagnostics.rxPipeline.detectorInputPeak = 0;
-  handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore = 0;
-  handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore = 0;
-  handshakeDiagnostics.rxPipeline.preambleThreshold = PREAMBLE_DETECTION_THRESHOLD;
-  handshakeDiagnostics.rxPipeline.lastDetectorWindowSampleCount = 0;
-  handshakeDiagnostics.rxPipeline.detectorLastActiveAtMs = null;
-  handshakeDiagnostics.rxPipeline.detectorLastEvaluatedAtMs = null;
-  handshakeDiagnostics.rxPipeline.detectorInputSource = 'rx_analyser_time_domain_snapshot';
-  handshakeDiagnostics.rxPipeline.detectorOffsetsEvaluated = 0;
-  handshakeDiagnostics.rxPipeline.bestSampleOffset = -1;
-  handshakeDiagnostics.rxPipeline.bestOffsetIndex = -1;
-  handshakeDiagnostics.rxPipeline.bestOffsetCorrelationScore = 0;
-  handshakeDiagnostics.rxPipeline.rxBufferedSamples = 0;
-  handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble = 0;
-  handshakeDiagnostics.rxPipeline.minSamplesRequiredHello = 0;
-  handshakeDiagnostics.rxPipeline.minSamplesRequiredData = 0;
-  handshakeDiagnostics.rxPipeline.frameTruncationDetected = false;
-  handshakeDiagnostics.rxPipeline.warning = null;
+  RX_PIPELINE.reset();
+  handshakeDiagnostics.rxPipeline = {
+    ...RX_PIPELINE.createInitialDiagnostics(),
+    preambleThreshold: PREAMBLE_DETECTION_THRESHOLD,
+    channelPolicy: handshakeDiagnostics.rxPipeline.channelPolicy,
+    warning: null,
+    detectorStageTruth: 'no_signal'
+  };
+  rxWorkletLastRms = 0;
+  rxWorkletLastPeak = 0;
   lastPipelineFrameHex = null;
 }
 
@@ -988,7 +788,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     await registerReceiverWorklet(ctx);
 
     handshakeDiagnostics.runtimeStartup.stage = 'create_audio_graph';
-    const graph = createAudioGraphRuntime(ctx, stream);
+    const graph = createAudioGraphRuntime(ctx, stream, { rxWorkletProcessorName: 'rx-stream-processor' });
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
     handshakeDiagnostics.transfer.audio.actualSampleRateHz = runtimeInfo.sampleRate;
@@ -999,15 +799,28 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     waveformDebugBuffer = [];
 
     let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
-    const intervalId = window.setInterval(() => {
-      levels = sampleAnalyserLevels(graph.rxAnalyser);
-      const decodeSlice = captureAnalyserTimeDomain(graph.rxAnalyser, graph.rxAnalyser.fftSize);
-      rxRollingSamples = appendToRollingSamples(rxRollingSamples, decodeSlice, RX_ROLLING_BUFFER_MAX_SAMPLES);
-      const pipelineEvent = runReceiverDecodePipeline(rxRollingSamples, runtimeInfo.sampleRate);
-      if (pipelineEvent && pipelineEvent.frameHex.length > 0 && pipelineEvent.frameHex !== lastPipelineFrameHex) {
-        lastPipelineFrameHex = pipelineEvent.frameHex;
-        window.dispatchEvent(new CustomEvent(RECEIVER_DECODED_RX_EVENT, { detail: pipelineEvent }));
+    graph.rxStreamTapNode?.port.addEventListener('message', (event) => {
+      const detail = event.data as { samples?: Float32Array; rms?: number; peak?: number };
+      if (typeof detail.rms === 'number') {
+        rxWorkletLastRms = detail.rms;
       }
+      if (typeof detail.peak === 'number') {
+        rxWorkletLastPeak = detail.peak;
+      }
+      const samples = detail.samples instanceof Float32Array ? detail.samples : null;
+      if (samples) {
+        handleContinuousRxSamples(diagEl, samples, runtimeInfo.sampleRate, 'rx_worklet_stream');
+      }
+    });
+    graph.rxStreamTapNode?.port.start();
+
+    const intervalId = window.setInterval(() => {
+      const analyserLevels = sampleAnalyserLevels(graph.rxAnalyser);
+      levels = {
+        rms: rxWorkletLastRms || analyserLevels.rms,
+        peakAbs: rxWorkletLastPeak || analyserLevels.peakAbs,
+        clipping: analyserLevels.clipping
+      };
       const toneFrequencyHz = graph.testToneFrequencyHz;
       const sampleTimestampMs = Date.now();
       if (graph.testToneStartedAtMs !== null && graph.testToneStartedAtMs !== receiverRuntime?.lastRecordedToneStartMs) {
@@ -1028,7 +841,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
         input: inputInfo,
         levels,
         graph: {
-          rxPath: 'mic -> channel_splitter -> mono_downmix -> analyser -> detector -> demod -> decoder -> session_bridge',
+          rxPath: 'mic -> channel_splitter -> mono_downmix -> worklet_stream_ring -> detector -> demod -> decoder -> session_bridge (analyser is diagnostics only)',
           txPath: 'txGain -> outputGain -> destination'
         },
         audioContextState: ctx.state,
@@ -1041,7 +854,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
         },
         handshake: handshakeDiagnostics,
         lastFinalResponseHex,
-        message: 'Receiver listening runtime initialized with active RX decode pipeline (worklet module name remains meter_processor.js for compatibility).'
+        message: 'Receiver listening runtime initialized with continuous worklet PCM RX pipeline; manual event/localStorage bridges are debug-only.'
       });
       if (SHOW_DEBUG_CONTROLS && isDebugStorageEnabled()) {
         maybeProcessDebugHello(diagEl);
@@ -1049,6 +862,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     }, 200);
 
     receiverRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now(), startupSource };
+    handshakeDiagnostics.receiverRuntimeAttached = true;
     handshakeDiagnostics.runtimeStartup.stage = 'ready';
     handshakeDiagnostics.runtimeStartup.lastSuccessAtMs = Date.now();
     stateEl.textContent = 'listen';
@@ -1248,21 +1062,26 @@ export function mountReceiverShell(root: HTMLElement): void {
 
   if (decodedRxEventListener) {
     window.removeEventListener(RECEIVER_DECODED_RX_EVENT, decodedRxEventListener);
+    decodedRxEventListener = null;
   }
-  decodedRxEventListener = (event: Event) => {
-    if (!(event instanceof CustomEvent)) return;
-    handleDecodedRxEvent(diagEl, event.detail as DecodedRxFrameEventDetail);
-  };
-  window.addEventListener(RECEIVER_DECODED_RX_EVENT, decodedRxEventListener);
-
   if (injectedSamplesEventListener) {
     window.removeEventListener(RECEIVER_INJECT_SAMPLES_EVENT, injectedSamplesEventListener);
+    injectedSamplesEventListener = null;
   }
-  injectedSamplesEventListener = (event: Event) => {
-    if (!(event instanceof CustomEvent)) return;
-    handleInjectedRxSamplesEvent(diagEl, event.detail as InjectRxSamplesEventDetail);
-  };
-  window.addEventListener(RECEIVER_INJECT_SAMPLES_EVENT, injectedSamplesEventListener);
+
+  if (SHOW_DEBUG_CONTROLS) {
+    decodedRxEventListener = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      handleDecodedRxEvent(diagEl, event.detail as DecodedRxFrameEventDetail);
+    };
+    window.addEventListener(RECEIVER_DECODED_RX_EVENT, decodedRxEventListener);
+
+    injectedSamplesEventListener = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      handleInjectedRxSamplesEvent(diagEl, event.detail as InjectRxSamplesEventDetail);
+    };
+    window.addEventListener(RECEIVER_INJECT_SAMPLES_EVENT, injectedSamplesEventListener);
+  }
 
   startBtn.addEventListener('click', () => {
     void startReceiver(stateEl, diagEl, () => debugStorageInput?.checked === true);
