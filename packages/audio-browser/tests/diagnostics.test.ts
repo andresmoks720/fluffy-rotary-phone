@@ -35,6 +35,11 @@ describe('audio diagnostics helpers', () => {
     } as unknown as MediaStreamTrack;
 
     expect(readInputTrackDiagnostics(fakeTrack)).toEqual({
+      deviceId: null,
+      label: null,
+      enabled: undefined,
+      muted: undefined,
+      readyState: undefined,
       sampleRate: 44100,
       channelCount: 1,
       echoCancellation: false,

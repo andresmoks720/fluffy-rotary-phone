@@ -17,6 +17,7 @@ describe('createAudioGraphRuntime', () => {
     const monoRight = { ...makeFakeNode(), gain: { value: 0 } };
     const monoBus = { ...makeFakeNode(), gain: { value: 0 } };
     const analyser = { ...makeFakeNode(), fftSize: 0 };
+    const rxSilentSink = { ...makeFakeNode(), gain: { value: 1 } };
     const txGain = { ...makeFakeNode(), gain: { value: 0 } };
     const outputGain = { ...makeFakeNode(), gain: { value: 0 } };
     const oscillator = { ...makeFakeNode(), start: vi.fn(), stop: vi.fn(), frequency: { value: 0 }, type: 'triangle' };
@@ -30,6 +31,7 @@ describe('createAudioGraphRuntime', () => {
         .mockReturnValueOnce(monoLeft)
         .mockReturnValueOnce(monoRight)
         .mockReturnValueOnce(monoBus)
+        .mockReturnValueOnce(rxSilentSink)
         .mockReturnValueOnce(txGain)
         .mockReturnValueOnce(outputGain),
       createOscillator: vi.fn(() => oscillator),
@@ -46,9 +48,12 @@ describe('createAudioGraphRuntime', () => {
     expect(monoLeft.connect).toHaveBeenCalledWith(monoBus);
     expect(monoRight.connect).toHaveBeenCalledWith(monoBus);
     expect(monoBus.connect).toHaveBeenCalledWith(analyser);
+    expect(monoBus.connect).toHaveBeenCalledWith(rxSilentSink);
+    expect(rxSilentSink.connect).toHaveBeenCalledWith(destination);
     expect(runtime.rxChannelPolicy).toBe('downmix_to_mono');
     expect(monoLeft.gain.value).toBe(0.5);
     expect(monoRight.gain.value).toBe(0.5);
+    expect(rxSilentSink.gain.value).toBe(0);
     expect(txGain.gain.value).toBe(1);
     expect(outputGain.gain.value).toBe(1);
     expect(txGain.connect).toHaveBeenCalledWith(outputGain);
@@ -73,6 +78,7 @@ describe('createAudioGraphRuntime', () => {
     expect(monoLeft.disconnect).toHaveBeenCalled();
     expect(monoRight.disconnect).toHaveBeenCalled();
     expect(monoBus.disconnect).toHaveBeenCalled();
+    expect(rxSilentSink.disconnect).toHaveBeenCalled();
     expect(analyser.disconnect).toHaveBeenCalled();
     expect(txGain.disconnect).toHaveBeenCalled();
     expect(outputGain.disconnect).toHaveBeenCalled();
@@ -88,6 +94,7 @@ describe('audio graph lifecycle resilience', () => {
     const monoRight = { ...makeFakeNode(), gain: { value: 0 } };
     const monoBus = { ...makeFakeNode(), gain: { value: 0 } };
     const analyser = { ...makeFakeNode(), fftSize: 0 };
+    const rxSilentSink = { ...makeFakeNode(), gain: { value: 1 } };
     const txGain = { ...makeFakeNode(), gain: { value: 0 } };
     const outputGain = { ...makeFakeNode(), gain: { value: 0 } };
 
@@ -102,6 +109,7 @@ describe('audio graph lifecycle resilience', () => {
         .mockReturnValueOnce(monoLeft)
         .mockReturnValueOnce(monoRight)
         .mockReturnValueOnce(monoBus)
+        .mockReturnValueOnce(rxSilentSink)
         .mockReturnValueOnce(txGain)
         .mockReturnValueOnce(outputGain),
       createOscillator: vi.fn(() => {

@@ -6,6 +6,7 @@ export interface AudioGraphRuntime {
   readonly rxDownmixLeftGain: GainNode;
   readonly rxDownmixRightGain: GainNode;
   readonly rxDownmixMonoBus: GainNode;
+  readonly rxSilentSink: GainNode;
   readonly rxStreamTapNode: AudioWorkletNode | null;
   readonly txGain: GainNode;
   readonly outputGain: GainNode;
@@ -30,12 +31,14 @@ export function createAudioGraphRuntime(
   const rxDownmixLeftGain = ctx.createGain();
   const rxDownmixRightGain = ctx.createGain();
   const rxDownmixMonoBus = ctx.createGain();
+  const rxSilentSink = ctx.createGain();
   const rxAnalyser = ctx.createAnalyser();
   rxAnalyser.fftSize = 32768;
 
   rxDownmixLeftGain.gain.value = 0.5;
   rxDownmixRightGain.gain.value = 0.5;
   rxDownmixMonoBus.gain.value = 1;
+  rxSilentSink.gain.value = 0;
 
   const txGain = ctx.createGain();
   txGain.gain.value = 1;
@@ -49,6 +52,8 @@ export function createAudioGraphRuntime(
   rxDownmixLeftGain.connect(rxDownmixMonoBus);
   rxDownmixRightGain.connect(rxDownmixMonoBus);
   rxDownmixMonoBus.connect(rxAnalyser);
+  rxDownmixMonoBus.connect(rxSilentSink);
+  rxSilentSink.connect(ctx.destination);
 
   let rxStreamTapNode: AudioWorkletNode | null = null;
   if (options.rxWorkletProcessorName && typeof AudioWorkletNode !== 'undefined') {
@@ -98,6 +103,7 @@ export function createAudioGraphRuntime(
     rxDownmixLeftGain,
     rxDownmixRightGain,
     rxDownmixMonoBus,
+    rxSilentSink,
     rxStreamTapNode,
     txGain,
     outputGain,
@@ -116,6 +122,7 @@ export function createAudioGraphRuntime(
       rxDownmixLeftGain.disconnect();
       rxDownmixRightGain.disconnect();
       rxDownmixMonoBus.disconnect();
+      rxSilentSink.disconnect();
       rxAnalyser.disconnect();
       rxStreamTapNode?.disconnect();
       txGain.disconnect();
