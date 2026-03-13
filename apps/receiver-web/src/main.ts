@@ -74,7 +74,6 @@ const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex'
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame';
 const RECEIVER_WORKLET_MODULE_CANDIDATES = [
-  '/meter_processor.js',
   new URL('meter_processor.js', window.location.href).toString()
 ] as const;
 
