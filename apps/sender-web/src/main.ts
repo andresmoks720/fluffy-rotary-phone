@@ -70,7 +70,6 @@ const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('deb
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const SENDER_DECODED_RX_EVENT = 'fluffy-rotary-phone:sender-decoded-rx-frame';
 const SENDER_WORKLET_MODULE_CANDIDATES = [
-  '/meter_processor.js',
   new URL('meter_processor.js', window.location.href).toString()
 ] as const;
 
