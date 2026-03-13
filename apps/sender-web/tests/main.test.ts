@@ -47,6 +47,7 @@ vi.mock('../../../packages/phy-safe/src/index.js', () => ({
 class FakeAudioContext {
   sampleRate = 48000;
   currentTime = 0;
+  state: AudioContextState = 'suspended';
   audioWorklet = { addModule: async () => undefined };
   destination = {};
   createBuffer(_ch: number, len: number): AudioBuffer {
@@ -63,6 +64,9 @@ class FakeAudioContext {
       },
       buffer: null
     } as unknown as AudioBufferSourceNode;
+  }
+  async resume(): Promise<void> {
+    this.state = 'running';
   }
   close(): Promise<void> { return Promise.resolve(); }
 }
@@ -452,7 +456,7 @@ describe('sender web shell', () => {
   });
 
 
-  it('copies diagnostics snapshot to clipboard', async () => {
+  it('copies status diagnostics and verbose diagnostics separately', async () => {
     await import('../src/main.ts');
 
     document.querySelector<HTMLButtonElement>('#sender-diag-copy')?.click();
@@ -462,9 +466,32 @@ describe('sender web shell', () => {
     expect(writeText).toHaveBeenCalledTimes(1);
     expect((writeText.mock.calls[0]?.[0] ?? '')).toContain('"senderState"');
 
-    const diag = document.querySelector('#sender-diag')?.textContent ?? '';
-    expect(diag).toContain('Diagnostics copied to clipboard.');
-    expect(diag).toContain('"clipboard"');
+    const statusDiag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(statusDiag).toContain('Diagnostics copied to clipboard.');
+    expect(statusDiag).toContain('"copiedTarget": "status"');
+
+    document.querySelector<HTMLButtonElement>('#sender-diag-copy-verbose')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect((writeText.mock.calls[1]?.[0] ?? '')).toContain('Sender shell mounted. Diagnostics initialized.');
+
+    const verboseDiag = document.querySelector('#sender-diag')?.textContent ?? '';
+    expect(verboseDiag).toContain('Verbose diagnostics copied to clipboard.');
+    expect(verboseDiag).toContain('"copiedTarget": "verbose"');
+  });
+
+  it('keeps verbose event log concise without dynamic levels payloads', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-start')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const verbose = document.querySelector('#sender-diag-verbose')?.textContent ?? '';
+    expect(verbose).toContain('Status: Diagnostics initialized; waiting for sender actions.');
+    expect(verbose).not.toContain('\"levels\"');
   });
 
 
