@@ -18,6 +18,7 @@ import { decodeFrame } from '../../../packages/protocol/src/index.js';
 import {
   DEFAULT_SAFE_CARRIER_MODULATION,
   LiveRxPipeline,
+  modulateSafeFrameWithPreambleToWaveform,
   type DecodedRxFrameEventDetail,
   type LiveRxPipelineDiagnostics
 } from '../../../packages/phy-safe/src/index.js';
@@ -768,6 +769,13 @@ function playFrameOverTxPath(runtime: ReceiverRuntime, frameBytes: Uint8Array): 
   source.start();
 }
 
+async function ensureAudioContextRunning(ctx: AudioContext): Promise<void> {
+  if (ctx.state === 'running') {
+    return;
+  }
+  await ctx.resume();
+}
+
 function stopReceiverRuntime(): void {
   if (!receiverRuntime) return;
 
@@ -791,6 +799,10 @@ async function registerReceiverWorklet(ctx: AudioContext): Promise<void> {
       handshakeDiagnostics.runtimeStartup.workletModuleErrors = errors;
       return;
     } catch (error) {
+      appendReceiverVerboseLog('Receiver worklet registration failed for module candidate.', {
+        moduleUrl,
+        error: String(error)
+      });
       errors.push(`${moduleUrl}: ${String(error)}`);
     }
   }
@@ -1022,11 +1034,18 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     handshakeDiagnostics.runtimeStartup.workletModuleSelected = null;
     handshakeDiagnostics.runtimeStartup.workletModuleErrors = [];
     const stream = await requestMicStream(window.navigator);
+    if (!stream || typeof stream.getAudioTracks !== 'function') {
+      throw new Error('Microphone request returned an invalid audio stream');
+    }
+    if (stream.getAudioTracks().length === 0) {
+      throw new Error('Microphone stream has no audio tracks');
+    }
     const track = stream.getAudioTracks()[0];
     if (!track) throw new Error('No audio track available');
 
     handshakeDiagnostics.runtimeStartup.stage = 'init_audio_context';
     const ctx = new AudioContext();
+    await ensureAudioContextRunning(ctx);
     handshakeDiagnostics.runtimeStartup.stage = 'register_worklet';
     await registerReceiverWorklet(ctx);
 
