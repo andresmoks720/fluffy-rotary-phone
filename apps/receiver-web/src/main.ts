@@ -357,6 +357,32 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
   const levelRms = levels?.rms ?? 0;
   const levelPeak = levels?.peakAbs ?? 0;
 
+  const meterBar = root.querySelector<HTMLElement>('#receiver-input-meter-bar');
+  const meterPeak = root.querySelector<HTMLElement>('#receiver-input-meter-peak');
+  const meterLabel = root.querySelector<HTMLElement>('#receiver-input-meter-label');
+
+  if (meterBar && meterPeak && meterLabel) {
+    const rmsPercent = Math.min(100, Math.sqrt(levelRms) * 100);
+    const peakPercent = Math.min(100, Math.sqrt(levelPeak) * 100);
+    
+    meterBar.style.width = `${rmsPercent}%`;
+    meterPeak.style.left = `${peakPercent}%`;
+
+    if (levels?.clipping) {
+      meterBar.style.backgroundColor = '#f44336';
+      meterLabel.textContent = 'Clipping';
+    } else if (levelRms >= RX_ACTIVITY_WARNING_RMS_THRESHOLD) {
+      meterBar.style.backgroundColor = '#4caf50';
+      meterLabel.textContent = 'Signal present';
+    } else if (levelRms > 0) {
+      meterBar.style.backgroundColor = '#4caf50';
+      meterLabel.textContent = 'Low input';
+    } else {
+      meterBar.style.backgroundColor = '#4caf50';
+      meterLabel.textContent = 'No input';
+    }
+  }
+
   statsEl.textContent = [
     `RX volume RMS: ${levelRms.toFixed(4)} | Peak: ${levelPeak.toFixed(4)}`,
     `Elapsed: ${elapsedSec.toFixed(2)} s | Goodput: ${goodputBps} bps | Bytes saved: ${savedBytes}`,
@@ -931,6 +957,14 @@ export function mountReceiverShell(root: HTMLElement): void {
 
       <section>
         <h2>Live modem stats</h2>
+        <div id="receiver-input-meter" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; font-family: monospace;">
+          <span>Input Level:</span>
+          <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc;">
+            <div id="receiver-input-meter-bar" style="height: 100%; background: #4caf50; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
+            <div id="receiver-input-meter-peak" style="position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0%; transition: left 0.1s linear;"></div>
+          </div>
+          <span id="receiver-input-meter-label">No input</span>
+        </div>
         <pre id="receiver-live-stats">Waiting for receiver runtime.</pre>
       </section>
 
