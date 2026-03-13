@@ -40,6 +40,13 @@ interface DecodedRxFrameEventDetail {
   readonly classification?: 'ok' | 'decode_error' | 'header_crc_failure' | 'payload_crc_failure' | 'timeout' | 'retry';
 }
 
+function normalizeDecodedFrameType(frameType: string | undefined): string | undefined {
+  if (frameType === 'HEADER') {
+    return 'HELLO';
+  }
+  return frameType;
+}
+
 interface ReceiverHandshakeDiagnostics {
   transfer: LiveDiagnosticsModel;
   transferBytesSaved: number;
@@ -320,19 +327,23 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
 }
 
 function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
-  if (detail.frameType === 'HELLO') {
+  const normalizedFrameType = normalizeDecodedFrameType(detail.frameType);
+  if (normalizedFrameType === 'HELLO') {
     processHelloHex(diagEl, detail.frameHex, false, detail.classification ?? 'ok');
     return;
   }
-  if (detail.frameType === 'DATA' || detail.frameType === 'END') {
-    processReceiverTransferFrame(diagEl, detail);
+  if (normalizedFrameType === 'DATA' || normalizedFrameType === 'END') {
+    processReceiverTransferFrame(diagEl, {
+      ...detail,
+      frameType: normalizedFrameType
+    });
     return;
   }
-  if (detail.frameType) {
+  if (normalizedFrameType) {
     handshakeDiagnostics.transfer.counters.decodeFailures += 1;
     handshakeDiagnostics.invalidTurnEvents += 1;
     handshakeDiagnostics.transfer.failure.category = 'decode_error';
-    handshakeDiagnostics.transfer.failure.reason = `unexpected decoded frame type for receiver shell: ${detail.frameType}`;
+    handshakeDiagnostics.transfer.failure.reason = `unexpected decoded frame type for receiver shell: ${normalizedFrameType}`;
     renderDiagnostics(diagEl, { handshake: handshakeDiagnostics });
     return;
   }

@@ -99,7 +99,7 @@ describe('receiver web shell', () => {
     window.dispatchEvent(new CustomEvent('fluffy-rotary-phone:receiver-decoded-rx-frame', {
       detail: {
         frameHex: helloHex,
-        frameType: 'HELLO',
+        frameType: 'HEADER',
         classification: 'ok'
       }
     }));
