@@ -1185,18 +1185,7 @@ export function mountReceiverShell(root: HTMLElement): void {
       <p>Decoded RX source: custom event <code>${RECEIVER_DECODED_RX_EVENT}</code></p>
       <p>Transfer RX frames accepted after handshake: <code>DATA</code>, <code>END</code></p>
 
-      <section>
-        <button id="receiver-start" type="button">Start</button>
-        <button id="receiver-cancel" type="button">Cancel</button>
-        <label for="receiver-carrier-frequency">TX carrier Hz (safe locked)</label>
-        <input id="receiver-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" disabled />
-        <label for="receiver-bandwidth">TX bandwidth Hz (safe locked)</label>
-        <input id="receiver-bandwidth" type="number" min="200" max="6000" step="50" value="2000" disabled />
-      </section>
-
-      ${debugControls}
-
-      <section>
+      <section style="margin-bottom: 2rem; border: 1px solid #eee; padding: 1rem; border-radius: 8px; background: #fafafa;">
         <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem;">
           <h2 style="margin: 0;">Live modem stats</h2>
           <span id="receiver-stats-live-badge" style="font-family: sans-serif; font-size: 0.75em; padding: 2px 8px; border-radius: 12px; background: #4caf50; color: #fff; font-weight: bold;">LIVE</span>
@@ -1252,6 +1241,17 @@ export function mountReceiverShell(root: HTMLElement): void {
       </section>
 
       <section>
+        <button id="receiver-start" type="button">Start</button>
+        <button id="receiver-cancel" type="button">Cancel</button>
+        <label for="receiver-carrier-frequency">TX carrier Hz (safe locked)</label>
+        <input id="receiver-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" disabled />
+        <label for="receiver-bandwidth">TX bandwidth Hz (safe locked)</label>
+        <input id="receiver-bandwidth" type="number" min="200" max="6000" step="50" value="2000" disabled />
+      </section>
+
+      ${debugControls}
+
+      <section>
         <details>
           <summary style="cursor: pointer; font-weight: bold; margin-bottom: 0.5rem;">Test tools (Manual bring-up)</summary>
           <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
@@ -1267,6 +1267,7 @@ export function mountReceiverShell(root: HTMLElement): void {
           </div>
         </details>
       </section>
+
 
 
       <section>
