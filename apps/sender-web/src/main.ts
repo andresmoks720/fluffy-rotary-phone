@@ -69,6 +69,8 @@ interface SenderHarnessDiagnostics {
 const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('debug') === '1';
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const SENDER_DECODED_RX_EVENT = 'fluffy-rotary-phone:sender-decoded-rx-frame';
+const SENDER_REQUEST_LAST_TX_WAVEFORM_EVENT = 'fluffy-rotary-phone:sender-request-last-tx-waveform';
+const SENDER_LAST_TX_WAVEFORM_EVENT = 'fluffy-rotary-phone:sender-last-tx-waveform';
 const SENDER_WORKLET_MODULE_CANDIDATES = [
   // Historical filename; processor now powers runtime RX telemetry integration.
   new URL('meter_processor.js', window.location.href).toString()
@@ -78,6 +80,7 @@ let senderRuntime: SenderRuntime | null = null;
 let senderStartInFlight: Promise<void> | null = null;
 let helloTransmitInFlight: Promise<void> | null = null;
 let decodedRxEventListener: ((event: Event) => void) | null = null;
+let senderWaveformRequestListener: ((event: Event) => void) | null = null;
 let senderDiagnosticsFrozen = false;
 let senderDiagnosticsPendingSnapshot: string | null = null;
 let senderDiagnosticsPendingStatusSnapshot: string | null = null;
@@ -93,6 +96,7 @@ let helloAckDeadlineMs: number | null = null;
 let burstAckDeadlineMs: number | null = null;
 let finalDeadlineMs: number | null = null;
 let pendingHelloBytes: Uint8Array | null = null;
+let lastTransmittedWaveform: Float32Array | null = null;
 const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   txModulation: {
     carrierFrequencyHz: DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz,
@@ -459,6 +463,7 @@ function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): vo
     samplesPerChip: DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip,
     amplitude: DEFAULT_SAFE_CARRIER_MODULATION.amplitude
   });
+  lastTransmittedWaveform = waveform;
   senderHarnessDiagnostics.txModulation.carrierFrequencyHz = DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz;
   senderHarnessDiagnostics.txModulation.bandwidthHz = Math.round(runtime.ctx.sampleRate / DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
   const output = runtime.ctx.createBuffer(1, waveform.length, runtime.ctx.sampleRate);
@@ -1039,6 +1044,19 @@ export function mountSenderShell(root: HTMLElement): void {
     handleDecodedRxEvent(diagEl, event.detail as DecodedRxFrameEventDetail);
   };
   window.addEventListener(SENDER_DECODED_RX_EVENT, decodedRxEventListener);
+
+  if (senderWaveformRequestListener) {
+    window.removeEventListener(SENDER_REQUEST_LAST_TX_WAVEFORM_EVENT, senderWaveformRequestListener);
+  }
+  senderWaveformRequestListener = () => {
+    window.dispatchEvent(new CustomEvent(SENDER_LAST_TX_WAVEFORM_EVENT, {
+      detail: {
+        sampleRateHz: senderRuntime?.ctx.sampleRate ?? 48000,
+        samples: lastTransmittedWaveform ? Array.from(lastTransmittedWaveform) : []
+      }
+    }));
+  };
+  window.addEventListener(SENDER_REQUEST_LAST_TX_WAVEFORM_EVENT, senderWaveformRequestListener);
 
   startBtn.addEventListener('click', () => {
     void startSender(root, stateEl, diagEl);

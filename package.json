@@ -7,7 +7,11 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "verify:fast": "./tools/verify_fast.sh",
+    "verify:protocol": "./tools/verify_protocol.sh",
+    "verify:runtime": "./tools/verify_runtime.sh",
+    "verify:mvp": "./tools/verify_mvp.sh"
   },
   "devDependencies": {
     "jsdom": "^24.1.3",

@@ -111,6 +111,7 @@ const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('deb
 const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame';
+const RECEIVER_INJECT_SAMPLES_EVENT = 'fluffy-rotary-phone:receiver-inject-rx-samples';
 const RX_ACTIVITY_WARNING_AFTER_MS = 3000;
 const RX_ACTIVITY_WARNING_RMS_THRESHOLD = 0.01;
 const PREAMBLE_DETECTION_THRESHOLD = 0.92;
@@ -124,6 +125,7 @@ const RECEIVER_WORKLET_MODULE_CANDIDATES = [
 let receiverRuntime: ReceiverRuntime | null = null;
 let receiverStartInFlight: Promise<void> | null = null;
 let decodedRxEventListener: ((event: Event) => void) | null = null;
+let injectedSamplesEventListener: ((event: Event) => void) | null = null;
 let receiverDiagnosticsFrozen = false;
 let receiverDiagnosticsPendingSnapshot: string | null = null;
 let receiverDiagnosticsPendingStatusSnapshot: string | null = null;
@@ -443,6 +445,37 @@ function runReceiverDecodePipeline(samples: Float32Array, sampleRateHz: number):
       classification: 'decode_error'
     };
   }
+}
+
+interface InjectRxSamplesEventDetail {
+  readonly samples: Float32Array | readonly number[];
+  readonly sampleRateHz?: number;
+}
+
+function handleInjectedRxSamplesEvent(diagEl: HTMLElement, detail: InjectRxSamplesEventDetail): void {
+  const sourceSamples = detail.samples;
+  const sampleBuffer = sourceSamples instanceof Float32Array
+    ? sourceSamples
+    : Float32Array.from(sourceSamples);
+
+  if (sampleBuffer.length === 0) {
+    return;
+  }
+
+  const sampleRateHz = Number.isFinite(detail.sampleRateHz)
+    ? (detail.sampleRateHz as number)
+    : receiverRuntime?.ctx.sampleRate ?? 48000;
+
+  rxRollingSamples = appendToRollingSamples(rxRollingSamples, sampleBuffer, RX_ROLLING_BUFFER_MAX_SAMPLES);
+  const pipelineEvent = runReceiverDecodePipeline(rxRollingSamples, sampleRateHz);
+  if (pipelineEvent) {
+    handleDecodedRxEvent(diagEl, pipelineEvent);
+    return;
+  }
+  renderDiagnostics(diagEl, {
+    handshake: handshakeDiagnostics,
+    message: 'Injected RX samples processed at rolling-buffer detector boundary without decoded frame.'
+  });
 }
 
 
@@ -1221,6 +1254,15 @@ export function mountReceiverShell(root: HTMLElement): void {
     handleDecodedRxEvent(diagEl, event.detail as DecodedRxFrameEventDetail);
   };
   window.addEventListener(RECEIVER_DECODED_RX_EVENT, decodedRxEventListener);
+
+  if (injectedSamplesEventListener) {
+    window.removeEventListener(RECEIVER_INJECT_SAMPLES_EVENT, injectedSamplesEventListener);
+  }
+  injectedSamplesEventListener = (event: Event) => {
+    if (!(event instanceof CustomEvent)) return;
+    handleInjectedRxSamplesEvent(diagEl, event.detail as InjectRxSamplesEventDetail);
+  };
+  window.addEventListener(RECEIVER_INJECT_SAMPLES_EVENT, injectedSamplesEventListener);
 
   startBtn.addEventListener('click', () => {
     void startReceiver(stateEl, diagEl, () => debugStorageInput?.checked === true);
