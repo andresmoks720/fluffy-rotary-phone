@@ -85,6 +85,7 @@ let senderDiagnosticsActiveTab: 'status' | 'verbose' = 'status';
 let senderVerboseLogEntries: string[] = [];
 let senderLastLoggedTransferState: string | null = null;
 let senderLastLoggedHandshakeResult: string | null = null;
+let senderLastLoggedStatusMessage: string | null = null;
 const senderHandshake = new LiveSenderHandshake();
 let senderTransfer: LiveSenderTransfer | null = null;
 let lastSeenAckHex: string | null = null;
@@ -123,8 +124,8 @@ function appendSenderVerboseLog(message: string, data?: unknown): void {
   const timestamp = new Date().toISOString();
   const payload = data === undefined ? '' : `\n${JSON.stringify(data, null, 2)}`;
   senderVerboseLogEntries.push(`[${timestamp}] ${message}${payload}`.trimEnd());
-  if (senderVerboseLogEntries.length > 200) {
-    senderVerboseLogEntries = senderVerboseLogEntries.slice(senderVerboseLogEntries.length - 200);
+  if (senderVerboseLogEntries.length > 80) {
+    senderVerboseLogEntries = senderVerboseLogEntries.slice(senderVerboseLogEntries.length - 80);
   }
 }
 
@@ -145,19 +146,41 @@ function buildSenderStatusSnapshot(data: unknown): Record<string, unknown> {
     bytesConfirmed: senderHarnessDiagnostics.transferBytesConfirmed,
     frameTransmitAttempts: senderHarnessDiagnostics.frameTransmitAttempts,
     invalidTurnEvents: senderHarnessDiagnostics.invalidTurnEvents,
+    clipboard: typeof data === 'object' && data !== null && 'clipboard' in data
+      ? (data as { clipboard?: unknown }).clipboard
+      : null,
     note: typeof data === 'object' && data !== null && 'message' in data
       ? (data as { message?: unknown }).message
       : null,
     error: typeof data === 'object' && data !== null && 'error' in data
       ? (data as { error?: unknown }).error
-      : null,
-    latestEvent: data
+      : null
   };
+}
+
+function buildSenderVerboseSnapshot(data: unknown): unknown {
+  if (typeof data !== 'object' || data === null) {
+    return data;
+  }
+
+  const source = data as Record<string, unknown>;
+  const verboseSnapshot: Record<string, unknown> = {};
+
+  if (typeof source.message === 'string') verboseSnapshot.message = source.message;
+  if (typeof source.error === 'string') verboseSnapshot.error = source.error;
+  if (source.clipboard !== undefined) verboseSnapshot.clipboard = source.clipboard;
+  if (source.audioContextState !== undefined) verboseSnapshot.audioContextState = source.audioContextState;
+  if (source.linkTiming !== undefined) verboseSnapshot.linkTiming = source.linkTiming;
+  if (source.testTone !== undefined) verboseSnapshot.testTone = source.testTone;
+  if (source.runtime !== undefined) verboseSnapshot.runtime = source.runtime;
+  if (source.input !== undefined) verboseSnapshot.input = source.input;
+  if (source.decodedRxEvent !== undefined) verboseSnapshot.decodedRxEvent = source.decodedRxEvent;
+
+  return verboseSnapshot;
 }
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   const statusSnapshot = JSON.stringify(buildSenderStatusSnapshot(data), null, 2);
-  const snapshot = JSON.stringify(data, null, 2);
   const verboseEl = document.querySelector<HTMLElement>('#sender-diag-verbose');
   if (!verboseEl) {
     return;
@@ -175,20 +198,29 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
     appendSenderVerboseLog(`Handshake result changed: ${senderLastLoggedHandshakeResult ?? 'unset'} -> ${handshakeResult}`);
     senderLastLoggedHandshakeResult = handshakeResult;
   }
-  if (typeof message === 'string' && message.length > 0) {
-    appendSenderVerboseLog(`Status: ${message}`, data);
+  const verboseEventData = buildSenderVerboseSnapshot(data);
+  if (typeof message === 'string' && message.length > 0 && message !== senderLastLoggedStatusMessage) {
+    appendSenderVerboseLog(`Status: ${message}`, verboseEventData);
+    senderLastLoggedStatusMessage = message;
   }
   if (typeof error === 'string' && error.length > 0) {
-    appendSenderVerboseLog(`Error: ${error}`, data);
+    appendSenderVerboseLog(`Error: ${error}`, verboseEventData);
   }
 
   if (senderDiagnosticsFrozen) {
     senderDiagnosticsPendingStatusSnapshot = statusSnapshot;
-    senderDiagnosticsPendingSnapshot = snapshot;
+    senderDiagnosticsPendingSnapshot = senderVerboseLogEntries.join('\n\n');
     return;
   }
   el.textContent = statusSnapshot;
-  verboseEl.textContent = `${senderVerboseLogEntries.join('\n\n')}\n\n--- latest snapshot ---\n${snapshot}`;
+  verboseEl.textContent = senderVerboseLogEntries.join('\n\n');
+}
+
+async function ensureAudioContextRunning(ctx: AudioContext): Promise<void> {
+  if (ctx.state === 'running') {
+    return;
+  }
+  await ctx.resume();
 }
 
 function setSenderDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose'): void {
@@ -410,6 +442,9 @@ function updateHandshakeDiagnostics(): void {
 }
 
 function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array, root: HTMLElement): void {
+  if (runtime.ctx.state !== 'running') {
+    void ensureAudioContextRunning(runtime.ctx);
+  }
   const carrierFrequencyHz = readTxCarrierFrequency(root);
   const bandwidthHz = readTxBandwidth(root);
   const chipSamples = deriveSamplesPerChip(runtime.ctx.sampleRate, bandwidthHz);
@@ -682,6 +717,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
 
       senderHarnessDiagnostics.runtimeStartup.stage = 'create_audio_graph';
       const graph = createAudioGraphRuntime(ctx, stream);
+      await ensureAudioContextRunning(ctx);
       const runtimeInfo = collectAudioRuntimeInfo(ctx);
       const inputInfo = readInputTrackDiagnostics(track);
       senderHarnessDiagnostics.transfer.audio.actualSampleRateHz = runtimeInfo.sampleRate;
@@ -749,6 +785,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
           rxPath: 'mic -> analyser',
           txPath: 'txGain -> outputGain -> destination'
         },
+        audioContextState: ctx.state,
         testTone: {
           active: toneFrequencyHz !== null,
           frequencyHz: toneFrequencyHz
@@ -862,12 +899,13 @@ export function mountSenderShell(root: HTMLElement): void {
         <p id="sender-diag-freeze-status">Diagnostics live (auto-updating).</p>
         <button id="sender-diag-freeze-toggle" type="button">Freeze diagnostics</button>
         <button id="sender-diag-copy" type="button">Copy diagnostics</button>
+        <button id="sender-diag-copy-verbose" type="button">Copy verbose log</button>
         <section id="sender-diag-panel-status">
           <h3>Status snapshot</h3>
           <pre id="sender-diag">Diagnostics pending runtime initialization.</pre>
         </section>
         <section id="sender-diag-panel-verbose" hidden>
-          <h3>Verbose log and raw snapshot</h3>
+          <h3>Verbose event log</h3>
           <pre id="sender-diag-verbose">Verbose diagnostics pending runtime initialization.</pre>
         </section>
       </section>
@@ -882,17 +920,19 @@ export function mountSenderShell(root: HTMLElement): void {
   const sendHelloBtn = root.querySelector<HTMLButtonElement>('#sender-send-hello');
   const freezeDiagBtn = root.querySelector<HTMLButtonElement>('#sender-diag-freeze-toggle');
   const copyDiagBtn = root.querySelector<HTMLButtonElement>('#sender-diag-copy');
+  const copyVerboseBtn = root.querySelector<HTMLButtonElement>('#sender-diag-copy-verbose');
   const statusTabBtn = root.querySelector<HTMLButtonElement>('#sender-diag-tab-status');
   const verboseTabBtn = root.querySelector<HTMLButtonElement>('#sender-diag-tab-verbose');
   const debugStorageInput = root.querySelector<HTMLInputElement>('#sender-debug-storage');
   const debugAckInput = root.querySelector<HTMLInputElement>('#sender-debug-ack-hex');
   const debugAckProcessBtn = root.querySelector<HTMLButtonElement>('#sender-debug-ack-process');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn || !freezeDiagBtn || !copyDiagBtn) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !toneBtn || !sendHelloBtn || !freezeDiagBtn || !copyDiagBtn || !copyVerboseBtn) {
     throw new Error('Missing sender shell elements');
   }
 
   senderVerboseLogEntries = [];
+  senderLastLoggedStatusMessage = null;
   appendSenderVerboseLog('Sender shell mounted. Diagnostics initialized.');
   const verboseEl = root.querySelector<HTMLElement>('#sender-diag-verbose');
   if (verboseEl) {
@@ -930,15 +970,13 @@ export function mountSenderShell(root: HTMLElement): void {
   copyDiagBtn.addEventListener('click', () => {
     void (async () => {
       const snapshot = diagEl.textContent ?? '';
-      const verboseSnapshot = root.querySelector<HTMLElement>('#sender-diag-verbose')?.textContent ?? '';
-      const activeSnapshot = senderDiagnosticsActiveTab === 'status' ? snapshot : verboseSnapshot;
       try {
-        await copyTextToClipboard(activeSnapshot);
+        await copyTextToClipboard(snapshot);
         renderDiagnostics(diagEl, {
           harness: senderHarnessDiagnostics,
           clipboard: {
-            copiedDiagnosticsChars: activeSnapshot.length,
-            copiedTab: senderDiagnosticsActiveTab
+            copiedDiagnosticsChars: snapshot.length,
+            copiedTarget: 'status'
           },
           message: 'Diagnostics copied to clipboard.'
         });
@@ -950,6 +988,33 @@ export function mountSenderShell(root: HTMLElement): void {
             error: String(error)
           },
           message: 'Failed to copy diagnostics to clipboard.'
+        });
+      }
+    })();
+  });
+
+  copyVerboseBtn.addEventListener('click', () => {
+    void (async () => {
+      const verboseSnapshot = root.querySelector<HTMLElement>('#sender-diag-verbose')?.textContent ?? '';
+      try {
+        await copyTextToClipboard(verboseSnapshot);
+        renderDiagnostics(diagEl, {
+          harness: senderHarnessDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: verboseSnapshot.length,
+            copiedTarget: 'verbose'
+          },
+          message: 'Verbose diagnostics copied to clipboard.'
+        });
+      } catch (error) {
+        renderDiagnostics(diagEl, {
+          harness: senderHarnessDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: 0,
+            copiedTarget: 'verbose',
+            error: String(error)
+          },
+          message: 'Failed to copy verbose diagnostics to clipboard.'
         });
       }
     })();
@@ -990,6 +1055,7 @@ export function mountSenderShell(root: HTMLElement): void {
           return;
         }
 
+        await ensureAudioContextRunning(senderRuntime.ctx);
         senderRuntime.graph.startTestTone(readTestToneFrequency(root));
       } catch (error) {
         senderHarnessDiagnostics.lastFailureReason = `Tone toggle failed: ${String(error)}`;
