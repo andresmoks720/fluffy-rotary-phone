@@ -31,6 +31,8 @@ export function createAudioGraphRuntime(
   const rxDownmixLeftGain = ctx.createGain();
   const rxDownmixRightGain = ctx.createGain();
   const rxDownmixMonoBus = ctx.createGain();
+  rxDownmixMonoBus.channelCount = 1;
+  rxDownmixMonoBus.channelCountMode = 'explicit';
   const rxSilentSink = ctx.createGain();
   const rxAnalyser = ctx.createAnalyser();
   rxAnalyser.fftSize = 32768;

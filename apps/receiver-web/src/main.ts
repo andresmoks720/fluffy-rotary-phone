@@ -1045,12 +1045,12 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
 
     handshakeDiagnostics.runtimeStartup.stage = 'init_audio_context';
     const ctx = new AudioContext();
-    await ensureAudioContextRunning(ctx);
     handshakeDiagnostics.runtimeStartup.stage = 'register_worklet';
     await registerReceiverWorklet(ctx);
 
     handshakeDiagnostics.runtimeStartup.stage = 'create_audio_graph';
     const graph = createAudioGraphRuntime(ctx, stream, { rxWorkletProcessorName: 'rx-stream-processor' });
+    await ensureAudioContextRunning(ctx);
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
     handshakeDiagnostics.transfer.audio.actualSampleRateHz = runtimeInfo.sampleRate;
