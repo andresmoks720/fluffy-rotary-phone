@@ -600,7 +600,6 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
     `Safe PHY: carrier=${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz}Hz samplesPerChip=${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} amp=${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)} (tx/rx locked)`
   ].join('\n');
 }
-}
 
 function setReceiverDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose'): void {
   receiverDiagnosticsActiveTab = tab;
@@ -1065,8 +1064,19 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
       const isWorkletStalled = rxWorkletChunkCount === lastIntervalChunkCount;
       lastIntervalChunkCount = rxWorkletChunkCount;
       
+      const detectorInputRms = handshakeDiagnostics.rxPipeline.detectorInputRms;
+      const detectorInputPeak = handshakeDiagnostics.rxPipeline.detectorInputPeak;
+      const detectorInputSource = handshakeDiagnostics.rxPipeline.detectorInputSource;
+      const detectorHasInputPath = handshakeDiagnostics.rxPipeline.detectorBufferFillSamples > 0;
+
       let inputClassification = 'stale_or_unknown';
-      if (!isWorkletStalled && rxWorkletLastRms !== null) {
+      if (detectorHasInputPath) {
+        if (detectorInputSource === 'rx_worklet_stream') {
+          inputClassification = detectorInputRms > 0 ? 'worklet_input_present' : 'no_input';
+        } else {
+          inputClassification = detectorInputRms > 0 ? 'injected_detector_input_present' : 'no_input';
+        }
+      } else if (!isWorkletStalled && rxWorkletLastRms !== null) {
         inputClassification = rxWorkletLastRms > 0 ? 'worklet_input_present' : 'no_input';
       } else if (analyserLevels.rms > 0) {
         inputClassification = 'analyser_only_input_present';
@@ -1074,11 +1084,17 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
         inputClassification = 'no_input';
       }
 
-      levels = {
-        rms: (!isWorkletStalled && rxWorkletLastRms !== null) ? rxWorkletLastRms : analyserLevels.rms,
-        peakAbs: (!isWorkletStalled && rxWorkletLastPeak !== null) ? rxWorkletLastPeak : analyserLevels.peakAbs,
-        clipping: analyserLevels.clipping
-      };
+      levels = detectorHasInputPath
+        ? {
+            rms: detectorInputRms,
+            peakAbs: detectorInputPeak,
+            clipping: analyserLevels.clipping || detectorInputPeak >= 0.999
+          }
+        : {
+            rms: (!isWorkletStalled && rxWorkletLastRms !== null) ? rxWorkletLastRms : analyserLevels.rms,
+            peakAbs: (!isWorkletStalled && rxWorkletLastPeak !== null) ? rxWorkletLastPeak : analyserLevels.peakAbs,
+            clipping: analyserLevels.clipping
+          };
       const toneFrequencyHz = graph.testToneFrequencyHz;
       const sampleTimestampMs = Date.now();
       if (graph.testToneStartedAtMs !== null && graph.testToneStartedAtMs !== receiverRuntime?.lastRecordedToneStartMs) {
