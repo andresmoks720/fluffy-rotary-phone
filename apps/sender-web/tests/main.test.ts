@@ -41,7 +41,7 @@ vi.mock('../../../packages/phy-safe/src/index.js', () => ({
     samplesPerChip: 24,
     amplitude: 0.1
   },
-  modulateSafeBpskToWaveform: () => new Float32Array([0.1, -0.1, 0.1, -0.1])
+  modulateSafeFrameWithPreambleToWaveform: () => new Float32Array([0.1, -0.1, 0.1, -0.1])
 }));
 
 class FakeAudioContext {
@@ -113,6 +113,12 @@ describe('sender web shell', () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     expect(document.querySelector('#sender-state')?.textContent).toBe('ready');
+    const liveStats = document.querySelector('#sender-live-stats')?.textContent ?? '';
+    expect(liveStats).toContain('RX volume RMS');
+    expect(liveStats).toContain('Frames TX/RX');
+    expect(liveStats).toContain('Safe PHY:');
+    expect(document.querySelector<HTMLInputElement>('#sender-carrier-frequency')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('#sender-bandwidth')?.disabled).toBe(true);
 
     const fileInput = document.querySelector<HTMLInputElement>('#sender-file');
     const file = new File([new Uint8Array([1, 2, 3, 4])], 'a.bin');

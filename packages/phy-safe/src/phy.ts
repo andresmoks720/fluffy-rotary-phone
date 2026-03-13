@@ -56,6 +56,28 @@ export function modulateSafeBpskToWaveform(
   sampleRateHz: number,
   config: SafeCarrierModulationConfig = DEFAULT_SAFE_CARRIER_MODULATION
 ): Float32Array {
+  const chips = modulateSafeBpsk(payload);
+  return mapChipsToWaveform(chips, sampleRateHz, config);
+}
+
+export function modulateSafeFrameWithPreambleToWaveform(
+  payload: Uint8Array,
+  sampleRateHz: number,
+  config: SafeCarrierModulationConfig = DEFAULT_SAFE_CARRIER_MODULATION
+): Float32Array {
+  const payloadChips = modulateSafeBpsk(payload);
+  const preamble = generateSafePreamble();
+  const chips = new Float32Array(preamble.length + payloadChips.length);
+  chips.set(preamble, 0);
+  chips.set(payloadChips, preamble.length);
+  return mapChipsToWaveform(chips, sampleRateHz, config);
+}
+
+function mapChipsToWaveform(
+  chips: Float32Array,
+  sampleRateHz: number,
+  config: SafeCarrierModulationConfig
+): Float32Array {
   if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0) {
     throw new Error('sampleRateHz must be a positive finite number.');
   }
@@ -73,7 +95,6 @@ export function modulateSafeBpskToWaveform(
     throw new Error('carrierFrequencyHz must be finite, positive, and below Nyquist.');
   }
 
-  const chips = modulateSafeBpsk(payload);
   const waveform = new Float32Array(chips.length * config.samplesPerChip);
   for (let i = 0; i < chips.length; i += 1) {
     const chip = chips[i];
@@ -83,7 +104,6 @@ export function modulateSafeBpskToWaveform(
     const mapped = mapChipToCarrierWave(chip, i, sampleRateHz, config.samplesPerChip, config);
     waveform.set(mapped, i * config.samplesPerChip);
   }
-
   return waveform;
 }
 
@@ -157,17 +177,25 @@ export function demodulateSafeBpsk(symbols: Float32Array): Uint8Array {
   return payload;
 }
 
-export function detectSafePreamble(
+
+export interface SafePreambleScanResult {
+  readonly bestIndex: number;
+  readonly bestScore: number;
+  readonly windowsEvaluated: number;
+  readonly hit: { index: number; score: number } | null;
+}
+
+export function scanSafePreambleCorrelation(
   samples: Float32Array,
   threshold: number
-): { index: number; score: number } | null {
+): SafePreambleScanResult {
   if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) {
     throw new Error('Threshold must be a finite number in (0, 1].');
   }
 
   const preamble = generateSafePreamble();
   if (samples.length < preamble.length) {
-    return null;
+    return { bestIndex: -1, bestScore: 0, windowsEvaluated: 0, hit: null };
   }
 
   let preambleEnergy = 0;
@@ -179,7 +207,13 @@ export function detectSafePreamble(
     preambleEnergy += preambleValue * preambleValue;
   }
 
+  let bestScore = Number.NEGATIVE_INFINITY;
+  let bestIndex = -1;
+  let hit: { index: number; score: number } | null = null;
+  let windowsEvaluated = 0;
+
   for (let offset = 0; offset <= samples.length - preamble.length; offset += 1) {
+    windowsEvaluated += 1;
     let dot = 0;
     let sampleEnergy = 0;
     for (let i = 0; i < preamble.length; i += 1) {
@@ -200,10 +234,25 @@ export function detectSafePreamble(
     }
 
     const score = dot / Math.sqrt(sampleEnergy * preambleEnergy);
-    if (score >= threshold) {
-      return { index: offset, score };
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = offset;
+    }
+    if (hit === null && score >= threshold) {
+      hit = { index: offset, score };
     }
   }
 
-  return null;
+  if (bestIndex < 0 || !Number.isFinite(bestScore)) {
+    return { bestIndex: -1, bestScore: 0, windowsEvaluated, hit };
+  }
+
+  return { bestIndex, bestScore, windowsEvaluated, hit };
+}
+
+export function detectSafePreamble(
+  samples: Float32Array,
+  threshold: number
+): { index: number; score: number } | null {
+  return scanSafePreambleCorrelation(samples, threshold).hit;
 }

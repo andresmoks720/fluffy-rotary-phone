@@ -10,6 +10,8 @@ export {
   DEFAULT_SAFE_CARRIER_MODULATION,
   modulateSafeBpsk,
   modulateSafeBpskToWaveform,
+  modulateSafeFrameWithPreambleToWaveform,
   demodulateSafeBpsk,
-  detectSafePreamble
+  detectSafePreamble,
+  scanSafePreambleCorrelation
 } from './phy.js';
