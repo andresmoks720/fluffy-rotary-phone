@@ -15,7 +15,7 @@ describe('createAudioGraphRuntime', () => {
     const splitter = makeFakeNode();
     const monoLeft = { ...makeFakeNode(), gain: { value: 0 } };
     const monoRight = { ...makeFakeNode(), gain: { value: 0 } };
-    const monoBus = { ...makeFakeNode(), gain: { value: 0 } };
+    const monoBus = { ...makeFakeNode(), gain: { value: 0 }, channelCount: 2, channelCountMode: 'max' as const };
     const analyser = { ...makeFakeNode(), fftSize: 0 };
     const rxSilentSink = { ...makeFakeNode(), gain: { value: 1 } };
     const txGain = { ...makeFakeNode(), gain: { value: 0 } };
@@ -54,6 +54,8 @@ describe('createAudioGraphRuntime', () => {
     expect(monoLeft.gain.value).toBe(0.5);
     expect(monoRight.gain.value).toBe(0.5);
     expect(rxSilentSink.gain.value).toBe(0);
+    expect(monoBus.channelCount).toBe(1);
+    expect(monoBus.channelCountMode).toBe('explicit');
     expect(txGain.gain.value).toBe(1);
     expect(outputGain.gain.value).toBe(1);
     expect(txGain.connect).toHaveBeenCalledWith(outputGain);
@@ -92,7 +94,7 @@ describe('audio graph lifecycle resilience', () => {
     const splitter = makeFakeNode();
     const monoLeft = { ...makeFakeNode(), gain: { value: 0 } };
     const monoRight = { ...makeFakeNode(), gain: { value: 0 } };
-    const monoBus = { ...makeFakeNode(), gain: { value: 0 } };
+    const monoBus = { ...makeFakeNode(), gain: { value: 0 }, channelCount: 2, channelCountMode: 'max' as const };
     const analyser = { ...makeFakeNode(), fftSize: 0 };
     const rxSilentSink = { ...makeFakeNode(), gain: { value: 1 } };
     const txGain = { ...makeFakeNode(), gain: { value: 0 } };

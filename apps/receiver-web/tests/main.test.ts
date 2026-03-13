@@ -24,6 +24,16 @@ const fakeRxStreamPort = {
   }),
   start: vi.fn()
 };
+const mockCreateAudioGraphRuntime = vi.fn(() => ({
+  rxAnalyser: {},
+  rxChannelPolicy: 'downmix_to_mono',
+  txGain: {},
+  rxStreamTapNode: { port: fakeRxStreamPort },
+  testToneFrequencyHz: null,
+  testToneStartedAtMs: null,
+  dispose: vi.fn()
+}));
+const mockRegisterWorklet = vi.fn(async () => undefined);
 
 function emitWorkletSamples(samples: Float32Array, rms = 0.01, peak = 0.1): void {
   workletMessageHandler?.({ data: { samples, rms, peak } });
@@ -34,22 +44,14 @@ vi.mock('../../../packages/audio-browser/src/index.js', () => {
     appendWaveformDebugEntry: (_buf: unknown[], entry: unknown) => [entry],
     captureAnalyserTimeDomain: mockCaptureAnalyserTimeDomain,
     collectAudioRuntimeInfo: () => ({ sampleRate: 48000 }),
-    createAudioGraphRuntime: () => ({
-      rxAnalyser: {},
-      rxChannelPolicy: 'downmix_to_mono',
-      txGain: {},
-      rxStreamTapNode: { port: fakeRxStreamPort },
-      testToneFrequencyHz: null,
-      testToneStartedAtMs: null,
-      dispose: vi.fn()
-    }),
+    createAudioGraphRuntime: mockCreateAudioGraphRuntime,
     readInputTrackDiagnostics: () => ({ channelCount: 1 }),
     LinkTimingEstimator: class {
       recordTxToneStart(): void {}
       recordRxSample(): void {}
       snapshot(): Record<string, number> { return { latencyMs: 0, driftPpm: 0 }; }
     },
-    registerWorklet: vi.fn(async () => undefined),
+    registerWorklet: mockRegisterWorklet,
     requestMicStream: vi.fn(async () => ({
       getAudioTracks: () => [{ stop: vi.fn() }],
       getTracks: () => [{ stop: vi.fn() }]
@@ -61,7 +63,12 @@ vi.mock('../../../packages/audio-browser/src/index.js', () => {
 
 class FakeAudioContext {
   static createdBufferLengths: number[] = [];
+  static instances: FakeAudioContext[] = [];
+  resumeCalls = 0;
   sampleRate = 48000;
+  constructor() {
+    FakeAudioContext.instances.push(this);
+  }
   state: AudioContextState = 'suspended';
   audioWorklet = { addModule: async () => undefined };
   destination = {};
@@ -79,6 +86,7 @@ class FakeAudioContext {
     } as unknown as AudioBufferSourceNode;
   }
   async resume(): Promise<void> {
+    this.resumeCalls += 1;
     this.state = 'running';
   }
   close(): Promise<void> { return Promise.resolve(); }
@@ -108,8 +116,11 @@ describe('receiver web shell', () => {
     mockCaptureAnalyserTimeDomain.mockReturnValue(new Float32Array([0.1, 0.2]));
     mockSampleAnalyserLevels.mockReset();
     mockSampleAnalyserLevels.mockReturnValue({ rms: 0.005, peakAbs: 0.2, clipping: false });
+    mockCreateAudioGraphRuntime.mockClear();
+    mockRegisterWorklet.mockClear();
     document.body.innerHTML = '<div id="app"></div>';
     FakeAudioContext.createdBufferLengths = [];
+    FakeAudioContext.instances = [];
     workletMessageHandler = null;
     vi.stubGlobal('AudioContext', FakeAudioContext);
   });
@@ -158,6 +169,36 @@ describe('receiver web shell', () => {
     expect(diag).toContain('\"handshakeResult\": \"accepted\"');
     expect(diag).toContain("processedHelloCount");
   }, 10000);
+
+  it('registers the receiver worklet and graph before resuming the audio context', async () => {
+    mockRegisterWorklet.mockImplementation(async (ctx: AudioContext) => {
+      expect((ctx as FakeAudioContext).state).toBe('suspended');
+    });
+    mockCreateAudioGraphRuntime.mockImplementation((ctx: AudioContext) => {
+      expect((ctx as FakeAudioContext).state).toBe('suspended');
+      return {
+        rxAnalyser: {},
+        rxChannelPolicy: 'downmix_to_mono',
+        txGain: {},
+        rxStreamTapNode: { port: fakeRxStreamPort },
+        testToneFrequencyHz: null,
+        testToneStartedAtMs: null,
+        dispose: vi.fn()
+      };
+    });
+
+    await import('../src/main.ts');
+    document.querySelector<HTMLButtonElement>('#receiver-start')?.click();
+
+    for (let i = 0; i < 20 && document.querySelector('#receiver-state')?.textContent !== 'listen'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(mockRegisterWorklet).toHaveBeenCalledTimes(1);
+    expect(mockCreateAudioGraphRuntime).toHaveBeenCalledTimes(1);
+    expect(FakeAudioContext.instances).toHaveLength(1);
+    expect(FakeAudioContext.instances[0]?.resumeCalls).toBeGreaterThan(0);
+  });
 
   it('warns when audio is present but detector path cannot progress', async () => {
     vi.useFakeTimers();
