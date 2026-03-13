@@ -82,6 +82,11 @@ interface ReceiverHandshakeDiagnostics {
       | 'parser_reached'
       | 'parser_failed_or_crc_failed';
   };
+  input?: import('../../../packages/audio-browser/src/diagnostics.js').InputTrackDiagnostics;
+  inputClassification: string | null;
+  workletChunkCount: number | null;
+  rxStreamTapNodeAttached: boolean | null;
+  audioContextState: AudioContextState | null;
 }
 
 const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('debug') === '1';
@@ -157,7 +162,12 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
     channelPolicy: 'downmix_to_mono',
     warning: null,
     detectorStageTruth: 'no_signal'
-  }
+  },
+  input: undefined,
+  inputClassification: null,
+  workletChunkCount: null,
+  rxStreamTapNodeAttached: null,
+  audioContextState: null
 };
 
 function appendReceiverVerboseLog(message: string, data?: unknown): void {
@@ -441,6 +451,12 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
     } else if (handshakeDiagnostics.transfer.state === 'SUCCEEDED') {
       msg = 'Transfer complete';
       color = '#4caf50';
+    } else if (handshakeDiagnostics.audioContextState !== 'running' && handshakeDiagnostics.audioContextState !== null) {
+      msg = `Audio context ${handshakeDiagnostics.audioContextState}`;
+      color = '#ff9800';
+    } else if (handshakeDiagnostics.inputClassification === 'stale_or_unknown') {
+      msg = 'Audio pipeline stalled';
+      color = '#ff9800';
     } else if (handshakeDiagnostics.transfer.state !== 'LISTEN' && handshakeDiagnostics.transfer.state !== 'IDLE') {
       msg = `Receiving transfer (${handshakeDiagnostics.transfer.state})`;
       color = '#4caf50';
@@ -577,6 +593,8 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
     `Last corr: ${handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore.toFixed(4)} | Best corr: ${handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore.toFixed(4)} | Threshold: ${handshakeDiagnostics.rxPipeline.preambleThreshold.toFixed(2)} | Best phase(rad): ${handshakeDiagnostics.rxPipeline.bestCarrierPhaseOffsetRad.toFixed(2)}`,
     `Detector hits/candidates: ${handshakeDiagnostics.rxPipeline.preambleDetectorHits}/${handshakeDiagnostics.rxPipeline.candidateFrameCount} | Demod/parser: ${handshakeDiagnostics.rxPipeline.demodAttempts}/${handshakeDiagnostics.rxPipeline.parserInvocations} | Stage: ${handshakeDiagnostics.rxPipeline.detectorStageTruth}`,
     `Buffer samples fill/rx: ${handshakeDiagnostics.rxPipeline.detectorBufferFillSamples}/${handshakeDiagnostics.rxPipeline.rxBufferedSamples} | Dropped: ${handshakeDiagnostics.rxPipeline.detectorBufferDroppedSamples} | Continuity: ${handshakeDiagnostics.rxPipeline.detectorInputContinuity}`,
+    `Input Class: ${inputClass ?? 'unknown'} | Worklet Chunks: ${handshakeDiagnostics.workletChunkCount ?? 0} | Tap node attached: ${handshakeDiagnostics.rxStreamTapNodeAttached ? 'yes' : 'no'}`,
+    `Audio Context: ${handshakeDiagnostics.audioContextState ?? 'unknown'} | Track: ${handshakeDiagnostics.input?.label ?? 'none'} (${handshakeDiagnostics.input?.enabled ? 'enabled' : 'disabled'}, ${handshakeDiagnostics.input?.muted ? 'muted' : 'unmuted'}, ${handshakeDiagnostics.input?.readyState ?? 'none'})`,
     `Min preamble/HELLO/DATA: ${handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredHello}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredData} | Truncation: ${handshakeDiagnostics.rxPipeline.frameTruncationDetected ? 'yes' : 'no'} | Warning: ${handshakeDiagnostics.rxPipeline.warning ?? 'none'}`,
     `State: ${handshakeDiagnostics.transfer.state} | Session: ${handshakeDiagnostics.sessionId ?? 'none'} | Handshake: ${handshakeDiagnostics.handshakeResult} | Runtime attached: ${handshakeDiagnostics.receiverRuntimeAttached ? 'yes' : 'no'}` ,
     `Safe PHY: carrier=${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz}Hz samplesPerChip=${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} amp=${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)} (tx/rx locked)`
@@ -1077,6 +1095,11 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
       waveformDebugBuffer = appendWaveformDebugEntry(waveformDebugBuffer, { timestampMs: Date.now(), levels }, 16);
 
       updateHandshakeDiagnostics();
+      handshakeDiagnostics.inputClassification = inputClassification;
+      handshakeDiagnostics.workletChunkCount = rxWorkletChunkCount;
+      handshakeDiagnostics.rxStreamTapNodeAttached = !!graph.rxStreamTapNode;
+      handshakeDiagnostics.audioContextState = ctx.state;
+
       renderDiagnostics(diagEl, {
         runtime: runtimeInfo,
         input: inputInfo,
@@ -1107,6 +1130,8 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
 
     receiverRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now(), startupSource };
     handshakeDiagnostics.receiverRuntimeAttached = true;
+    handshakeDiagnostics.input = inputInfo;
+    handshakeDiagnostics.audioContextState = ctx.state;
     handshakeDiagnostics.runtimeStartup.stage = 'ready';
     handshakeDiagnostics.runtimeStartup.lastSuccessAtMs = Date.now();
     stateEl.textContent = 'listen';
