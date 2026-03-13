@@ -1,6 +1,11 @@
 export interface AudioGraphRuntime {
   readonly source: MediaStreamAudioSourceNode;
+  readonly rxChannelPolicy: 'downmix_to_mono';
   readonly rxAnalyser: AnalyserNode;
+  readonly rxDownmixSplitter: ChannelSplitterNode;
+  readonly rxDownmixLeftGain: GainNode;
+  readonly rxDownmixRightGain: GainNode;
+  readonly rxDownmixMonoBus: GainNode;
   readonly txGain: GainNode;
   readonly outputGain: GainNode;
   readonly testToneFrequencyHz: number | null;
@@ -12,8 +17,16 @@ export interface AudioGraphRuntime {
 
 export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream): AudioGraphRuntime {
   const source = ctx.createMediaStreamSource(stream);
+  const rxDownmixSplitter = ctx.createChannelSplitter(2);
+  const rxDownmixLeftGain = ctx.createGain();
+  const rxDownmixRightGain = ctx.createGain();
+  const rxDownmixMonoBus = ctx.createGain();
   const rxAnalyser = ctx.createAnalyser();
-  rxAnalyser.fftSize = 2048;
+  rxAnalyser.fftSize = 32768;
+
+  rxDownmixLeftGain.gain.value = 0.5;
+  rxDownmixRightGain.gain.value = 0.5;
+  rxDownmixMonoBus.gain.value = 1;
 
   const txGain = ctx.createGain();
   // Keep TX path audible by default so test tone and frame playback are observable.
@@ -22,8 +35,13 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
   const outputGain = ctx.createGain();
   outputGain.gain.value = 1;
 
-  // RX sample path: microphone -> analyser.
-  source.connect(rxAnalyser);
+  // RX sample path: microphone -> deterministic mono downmix -> analyser.
+  source.connect(rxDownmixSplitter);
+  rxDownmixSplitter.connect(rxDownmixLeftGain, 0);
+  rxDownmixSplitter.connect(rxDownmixRightGain, 1);
+  rxDownmixLeftGain.connect(rxDownmixMonoBus);
+  rxDownmixRightGain.connect(rxDownmixMonoBus);
+  rxDownmixMonoBus.connect(rxAnalyser);
 
   // TX/playback path skeleton: txGain -> outputGain -> destination.
   txGain.connect(outputGain);
@@ -61,7 +79,12 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
 
   return {
     source,
+    rxChannelPolicy: 'downmix_to_mono',
     rxAnalyser,
+    rxDownmixSplitter,
+    rxDownmixLeftGain,
+    rxDownmixRightGain,
+    rxDownmixMonoBus,
     txGain,
     outputGain,
     get testToneFrequencyHz() {
@@ -75,6 +98,10 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
     dispose() {
       stopTestTone();
       source.disconnect();
+      rxDownmixSplitter.disconnect();
+      rxDownmixLeftGain.disconnect();
+      rxDownmixRightGain.disconnect();
+      rxDownmixMonoBus.disconnect();
       rxAnalyser.disconnect();
       txGain.disconnect();
       outputGain.disconnect();

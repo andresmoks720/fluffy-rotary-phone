@@ -12,6 +12,10 @@ function makeFakeNode() {
 describe('createAudioGraphRuntime', () => {
   it('builds rx and tx/playback paths', () => {
     const source = makeFakeNode();
+    const splitter = makeFakeNode();
+    const monoLeft = { ...makeFakeNode(), gain: { value: 0 } };
+    const monoRight = { ...makeFakeNode(), gain: { value: 0 } };
+    const monoBus = { ...makeFakeNode(), gain: { value: 0 } };
     const analyser = { ...makeFakeNode(), fftSize: 0 };
     const txGain = { ...makeFakeNode(), gain: { value: 0 } };
     const outputGain = { ...makeFakeNode(), gain: { value: 0 } };
@@ -20,8 +24,12 @@ describe('createAudioGraphRuntime', () => {
 
     const ctx = {
       createMediaStreamSource: vi.fn(() => source),
+      createChannelSplitter: vi.fn(() => splitter),
       createAnalyser: vi.fn(() => analyser),
       createGain: vi.fn()
+        .mockReturnValueOnce(monoLeft)
+        .mockReturnValueOnce(monoRight)
+        .mockReturnValueOnce(monoBus)
         .mockReturnValueOnce(txGain)
         .mockReturnValueOnce(outputGain),
       createOscillator: vi.fn(() => oscillator),
@@ -31,8 +39,16 @@ describe('createAudioGraphRuntime', () => {
     const runtime = createAudioGraphRuntime(ctx, {} as MediaStream);
 
     expect(ctx.createMediaStreamSource).toHaveBeenCalled();
-    expect(analyser.fftSize).toBe(2048);
-    expect(source.connect).toHaveBeenCalledWith(analyser);
+    expect(analyser.fftSize).toBe(32768);
+    expect(source.connect).toHaveBeenCalledWith(splitter);
+    expect(splitter.connect).toHaveBeenCalledWith(monoLeft, 0);
+    expect(splitter.connect).toHaveBeenCalledWith(monoRight, 1);
+    expect(monoLeft.connect).toHaveBeenCalledWith(monoBus);
+    expect(monoRight.connect).toHaveBeenCalledWith(monoBus);
+    expect(monoBus.connect).toHaveBeenCalledWith(analyser);
+    expect(runtime.rxChannelPolicy).toBe('downmix_to_mono');
+    expect(monoLeft.gain.value).toBe(0.5);
+    expect(monoRight.gain.value).toBe(0.5);
     expect(txGain.gain.value).toBe(1);
     expect(outputGain.gain.value).toBe(1);
     expect(txGain.connect).toHaveBeenCalledWith(outputGain);
@@ -53,6 +69,10 @@ describe('createAudioGraphRuntime', () => {
 
     runtime.dispose();
     expect(source.disconnect).toHaveBeenCalled();
+    expect(splitter.disconnect).toHaveBeenCalled();
+    expect(monoLeft.disconnect).toHaveBeenCalled();
+    expect(monoRight.disconnect).toHaveBeenCalled();
+    expect(monoBus.disconnect).toHaveBeenCalled();
     expect(analyser.disconnect).toHaveBeenCalled();
     expect(txGain.disconnect).toHaveBeenCalled();
     expect(outputGain.disconnect).toHaveBeenCalled();
@@ -63,6 +83,10 @@ describe('createAudioGraphRuntime', () => {
 describe('audio graph lifecycle resilience', () => {
   it('supports repeated start/cancel cycles without leaked tone state', () => {
     const source = makeFakeNode();
+    const splitter = makeFakeNode();
+    const monoLeft = { ...makeFakeNode(), gain: { value: 0 } };
+    const monoRight = { ...makeFakeNode(), gain: { value: 0 } };
+    const monoBus = { ...makeFakeNode(), gain: { value: 0 } };
     const analyser = { ...makeFakeNode(), fftSize: 0 };
     const txGain = { ...makeFakeNode(), gain: { value: 0 } };
     const outputGain = { ...makeFakeNode(), gain: { value: 0 } };
@@ -72,8 +96,14 @@ describe('audio graph lifecycle resilience', () => {
 
     const ctx = {
       createMediaStreamSource: vi.fn(() => source),
+      createChannelSplitter: vi.fn(() => splitter),
       createAnalyser: vi.fn(() => analyser),
-      createGain: vi.fn().mockReturnValueOnce(txGain).mockReturnValueOnce(outputGain),
+      createGain: vi.fn()
+        .mockReturnValueOnce(monoLeft)
+        .mockReturnValueOnce(monoRight)
+        .mockReturnValueOnce(monoBus)
+        .mockReturnValueOnce(txGain)
+        .mockReturnValueOnce(outputGain),
       createOscillator: vi.fn(() => {
         const o = makeOsc();
         oscillators.push(o);
