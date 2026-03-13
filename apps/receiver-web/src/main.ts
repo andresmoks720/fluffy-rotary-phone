@@ -57,14 +57,36 @@ interface ReceiverHandshakeDiagnostics {
   handshakeReason: string | null;
   processedHelloCount: number;
   lastFailureReason: string | null;
+  runtimeStartup: {
+    attempts: number;
+    stage: 'idle' | 'request_mic' | 'init_audio_context' | 'register_worklet' | 'create_audio_graph' | 'ready' | 'failed';
+    lastAttemptAtMs: number | null;
+    lastSuccessAtMs: number | null;
+    workletModuleCandidates: readonly string[];
+    workletModuleSelected: string | null;
+    workletModuleErrors: readonly string[];
+    lastError: string | null;
+  };
 }
 
 const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('debug') === '1';
 const LIVE_HELLO_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-hex';
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame';
+const RECEIVER_WORKLET_MODULE_CANDIDATES = [
+  '/meter_processor.js',
+  new URL('meter_processor.js', window.location.href).toString()
+] as const;
 
 let receiverRuntime: ReceiverRuntime | null = null;
+let receiverStartInFlight: Promise<void> | null = null;
+let receiverDiagnosticsFrozen = false;
+let receiverDiagnosticsPendingSnapshot: string | null = null;
+let receiverDiagnosticsPendingStatusSnapshot: string | null = null;
+let receiverVerboseLogEntries: string[] = [];
+let receiverLastLoggedTransferState: string | null = null;
+let receiverLastLoggedHandshakeResult: string | null = null;
+let receiverLastLoggedStatusMessage: string | null = null;
 const receiverHandshake = new LiveReceiverHandshake();
 let receiverTransfer: LiveReceiverTransfer | null = null;
 let lastFinalResponseHex: string | null = null;
@@ -83,11 +105,106 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   processedHelloCount: 0,
   lastFailureReason: null,
   transferBytesSaved: 0,
-  invalidTurnEvents: 0
+  invalidTurnEvents: 0,
+  runtimeStartup: {
+    attempts: 0,
+    stage: 'idle',
+    lastAttemptAtMs: null,
+    lastSuccessAtMs: null,
+    workletModuleCandidates: RECEIVER_WORKLET_MODULE_CANDIDATES,
+    workletModuleSelected: null,
+    workletModuleErrors: [],
+    lastError: null
+  }
 };
 
+function appendReceiverVerboseLog(message: string, data?: unknown): void {
+  const timestamp = new Date().toISOString();
+  const payload = data === undefined ? '' : `\n${JSON.stringify(data, null, 2)}`;
+  receiverVerboseLogEntries.push(`[${timestamp}] ${message}${payload}`.trimEnd());
+  if (receiverVerboseLogEntries.length > 80) {
+    receiverVerboseLogEntries = receiverVerboseLogEntries.slice(receiverVerboseLogEntries.length - 80);
+  }
+}
+
+function buildReceiverStatusSnapshot(data: unknown): Record<string, unknown> {
+  const source = (typeof data === 'object' && data !== null) ? data as Record<string, unknown> : {};
+  return {
+    receiverState: handshakeDiagnostics.transfer.state,
+    state: handshakeDiagnostics.transfer.state,
+    handshakeResult: handshakeDiagnostics.handshakeResult,
+    handshakeReason: handshakeDiagnostics.handshakeReason,
+    sessionId: handshakeDiagnostics.sessionId,
+    turnOwner: handshakeDiagnostics.currentTurnOwner,
+    startupStage: handshakeDiagnostics.runtimeStartup.stage,
+    runtimeStartup: handshakeDiagnostics.runtimeStartup,
+    lastFailureReason: handshakeDiagnostics.lastFailureReason,
+    failure: handshakeDiagnostics.transfer.failure,
+    counters: handshakeDiagnostics.transfer.counters,
+    timing: handshakeDiagnostics.transfer.timing,
+    bytesSaved: handshakeDiagnostics.transferBytesSaved,
+    invalidTurnEvents: handshakeDiagnostics.invalidTurnEvents,
+    processedHelloCount: handshakeDiagnostics.processedHelloCount,
+    lastFinalResponseHex: source.lastFinalResponseHex ?? lastFinalResponseHex,
+    note: source.message ?? null,
+    error: source.error ?? null
+  };
+}
+
+function buildReceiverVerboseSnapshot(data: unknown): unknown {
+  if (typeof data !== 'object' || data === null) {
+    return data;
+  }
+  const source = data as Record<string, unknown>;
+  const verboseSnapshot: Record<string, unknown> = {};
+  if (typeof source.message === 'string') verboseSnapshot.message = source.message;
+  if (typeof source.error === 'string') verboseSnapshot.error = source.error;
+  if (source.runtime !== undefined) verboseSnapshot.runtime = source.runtime;
+  if (source.input !== undefined) verboseSnapshot.input = source.input;
+  if (source.levels !== undefined) verboseSnapshot.levels = source.levels;
+  if (source.audioContextState !== undefined) verboseSnapshot.audioContextState = source.audioContextState;
+  if (source.linkTiming !== undefined) verboseSnapshot.linkTiming = source.linkTiming;
+  if (source.rxCapture !== undefined) verboseSnapshot.rxCapture = source.rxCapture;
+  if (source.waveformDebug !== undefined) verboseSnapshot.waveformDebug = source.waveformDebug;
+  if (source.decodedRxEvent !== undefined) verboseSnapshot.decodedRxEvent = source.decodedRxEvent;
+  return verboseSnapshot;
+}
+
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
-  el.textContent = JSON.stringify(data, null, 2);
+  const statusSnapshot = JSON.stringify(buildReceiverStatusSnapshot(data), null, 2);
+  const verboseEl = document.querySelector<HTMLElement>('#receiver-diag-verbose');
+  if (!verboseEl) {
+    return;
+  }
+
+  const message = typeof data === 'object' && data !== null && 'message' in data ? (data as { message?: unknown }).message : null;
+  const error = typeof data === 'object' && data !== null && 'error' in data ? (data as { error?: unknown }).error : null;
+  const transferState = handshakeDiagnostics.transfer.state;
+  const handshakeResult = handshakeDiagnostics.handshakeResult;
+  if (transferState !== receiverLastLoggedTransferState) {
+    appendReceiverVerboseLog(`Transfer state changed: ${receiverLastLoggedTransferState ?? 'unset'} -> ${transferState}`);
+    receiverLastLoggedTransferState = transferState;
+  }
+  if (handshakeResult !== receiverLastLoggedHandshakeResult) {
+    appendReceiverVerboseLog(`Handshake result changed: ${receiverLastLoggedHandshakeResult ?? 'unset'} -> ${handshakeResult}`);
+    receiverLastLoggedHandshakeResult = handshakeResult;
+  }
+  const verboseEventData = buildReceiverVerboseSnapshot(data);
+  if (typeof message === 'string' && message.length > 0 && message !== receiverLastLoggedStatusMessage) {
+    appendReceiverVerboseLog(`Status: ${message}`, verboseEventData);
+    receiverLastLoggedStatusMessage = message;
+  }
+  if (typeof error === 'string' && error.length > 0) {
+    appendReceiverVerboseLog(`Error: ${error}`, verboseEventData);
+  }
+
+  if (receiverDiagnosticsFrozen) {
+    receiverDiagnosticsPendingStatusSnapshot = statusSnapshot;
+    receiverDiagnosticsPendingSnapshot = receiverVerboseLogEntries.join('\n\n');
+    return;
+  }
+  el.textContent = statusSnapshot;
+  verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -195,6 +312,23 @@ function stopReceiverRuntime(): void {
   waveformDebugBuffer = [];
 }
 
+async function registerReceiverWorklet(ctx: AudioContext): Promise<void> {
+  const errors: string[] = [];
+  for (const moduleUrl of RECEIVER_WORKLET_MODULE_CANDIDATES) {
+    try {
+      await registerWorklet(ctx, moduleUrl);
+      handshakeDiagnostics.runtimeStartup.workletModuleSelected = moduleUrl;
+      handshakeDiagnostics.runtimeStartup.workletModuleErrors = errors;
+      return;
+    } catch (error) {
+      errors.push(`${moduleUrl}: ${String(error)}`);
+    }
+  }
+
+  handshakeDiagnostics.runtimeStartup.workletModuleErrors = errors;
+  throw new Error(`Unable to register receiver worklet. Attempted modules: ${errors.join(' | ')}`);
+}
+
 function resetReceiverSessionState(): void {
   receiverHandshake.reset();
   lastSeenHelloHex = null;
@@ -207,6 +341,9 @@ function resetReceiverSessionState(): void {
   handshakeDiagnostics.lastFailureReason = null;
   handshakeDiagnostics.transferBytesSaved = 0;
   handshakeDiagnostics.invalidTurnEvents = 0;
+  receiverLastLoggedTransferState = null;
+  receiverLastLoggedHandshakeResult = null;
+  receiverLastLoggedStatusMessage = null;
   receiverTransfer = null;
   lastFinalResponseHex = null;
 }
@@ -357,18 +494,33 @@ function maybeProcessDebugHello(diagEl: HTMLElement): void {
 }
 
 async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugStorageEnabled: () => boolean): Promise<void> {
+  if (receiverStartInFlight) {
+    await receiverStartInFlight;
+    return;
+  }
+
+  const startPromise = (async () => {
   stopReceiverRuntime();
   resetReceiverSessionState();
   stateEl.textContent = 'starting';
 
   try {
+    handshakeDiagnostics.runtimeStartup.attempts += 1;
+    handshakeDiagnostics.runtimeStartup.stage = 'request_mic';
+    handshakeDiagnostics.runtimeStartup.lastAttemptAtMs = Date.now();
+    handshakeDiagnostics.runtimeStartup.lastError = null;
+    handshakeDiagnostics.runtimeStartup.workletModuleSelected = null;
+    handshakeDiagnostics.runtimeStartup.workletModuleErrors = [];
     const stream = await requestMicStream(window.navigator);
     const track = stream.getAudioTracks()[0];
     if (!track) throw new Error('No audio track available');
 
+    handshakeDiagnostics.runtimeStartup.stage = 'init_audio_context';
     const ctx = new AudioContext();
-    await registerWorklet(ctx, '/meter_processor.js');
+    handshakeDiagnostics.runtimeStartup.stage = 'register_worklet';
+    await registerReceiverWorklet(ctx);
 
+    handshakeDiagnostics.runtimeStartup.stage = 'create_audio_graph';
     const graph = createAudioGraphRuntime(ctx, stream);
     const runtimeInfo = collectAudioRuntimeInfo(ctx);
     const inputInfo = readInputTrackDiagnostics(track);
@@ -403,6 +555,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
           rxPath: 'mic -> analyser',
           txPath: 'txGain -> outputGain -> destination'
         },
+        audioContextState: ctx.state,
         rxCapture: lastCapture,
         linkTiming,
         decodedRxEvent: RECEIVER_DECODED_RX_EVENT,
@@ -420,11 +573,32 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     }, 200);
 
     receiverRuntime = { stream, ctx, graph, intervalId, timing, lastRecordedToneStartMs: null, startedAtMs: Date.now() };
+    handshakeDiagnostics.runtimeStartup.stage = 'ready';
+    handshakeDiagnostics.runtimeStartup.lastSuccessAtMs = Date.now();
     stateEl.textContent = 'listen';
   } catch (error) {
     resetReceiverSessionState();
     stateEl.textContent = 'failed';
-    renderDiagnostics(diagEl, { error: String(error) });
+    handshakeDiagnostics.runtimeStartup.stage = 'failed';
+    handshakeDiagnostics.runtimeStartup.lastError = String(error);
+    handshakeDiagnostics.lastFailureReason = `Receiver runtime startup failed: ${String(error)}`;
+    handshakeDiagnostics.transfer.failure.category = 'unknown';
+    handshakeDiagnostics.transfer.failure.reason = handshakeDiagnostics.lastFailureReason;
+    renderDiagnostics(diagEl, {
+      handshake: handshakeDiagnostics,
+      error: handshakeDiagnostics.lastFailureReason,
+      message: 'Receiver runtime startup failed during start request.'
+    });
+  }
+  })();
+
+  receiverStartInFlight = startPromise;
+  try {
+    await startPromise;
+  } finally {
+    if (receiverStartInFlight === startPromise) {
+      receiverStartInFlight = null;
+    }
   }
 }
 
@@ -467,7 +641,18 @@ export function mountReceiverShell(root: HTMLElement): void {
 
       <section>
         <h2>Diagnostics</h2>
-        <pre id="receiver-diag">Diagnostics pending runtime initialization.</pre>
+        <p>
+          <button id="receiver-diag-freeze-toggle" type="button">Freeze diagnostics</button>
+          <span id="receiver-diag-freeze-status">Diagnostics live (auto-updating).</span>
+        </p>
+        <section>
+          <h3>Status snapshot</h3>
+          <pre id="receiver-diag">Diagnostics pending runtime initialization.</pre>
+        </section>
+        <section>
+          <h3>Verbose log</h3>
+          <pre id="receiver-diag-verbose">Verbose diagnostics pending runtime initialization.</pre>
+        </section>
       </section>
     </main>
   `;
@@ -477,13 +662,40 @@ export function mountReceiverShell(root: HTMLElement): void {
   const startBtn = root.querySelector<HTMLButtonElement>('#receiver-start');
   const cancelBtn = root.querySelector<HTMLButtonElement>('#receiver-cancel');
   const captureBtn = root.querySelector<HTMLButtonElement>('#receiver-capture');
+  const freezeDiagBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-freeze-toggle');
+  const verboseEl = root.querySelector<HTMLElement>('#receiver-diag-verbose');
   const debugStorageInput = root.querySelector<HTMLInputElement>('#receiver-debug-storage');
   const debugHelloInput = root.querySelector<HTMLInputElement>('#receiver-debug-hello-hex');
   const debugHelloProcessBtn = root.querySelector<HTMLButtonElement>('#receiver-debug-hello-process');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn || !freezeDiagBtn || !verboseEl) {
     throw new Error('Missing receiver shell elements');
   }
+
+  receiverVerboseLogEntries = [];
+  appendReceiverVerboseLog('Receiver shell mounted. Diagnostics initialized.');
+  verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
+
+  freezeDiagBtn.addEventListener('click', () => {
+    receiverDiagnosticsFrozen = !receiverDiagnosticsFrozen;
+    freezeDiagBtn.textContent = receiverDiagnosticsFrozen ? 'Resume diagnostics' : 'Freeze diagnostics';
+    const statusEl = root.querySelector<HTMLElement>('#receiver-diag-freeze-status');
+    if (statusEl) {
+      statusEl.textContent = receiverDiagnosticsFrozen
+        ? 'Diagnostics frozen (snapshot locked for copy).'
+        : 'Diagnostics live (auto-updating).';
+    }
+    if (!receiverDiagnosticsFrozen) {
+      if (receiverDiagnosticsPendingStatusSnapshot !== null) {
+        diagEl.textContent = receiverDiagnosticsPendingStatusSnapshot;
+        receiverDiagnosticsPendingStatusSnapshot = null;
+      }
+      if (receiverDiagnosticsPendingSnapshot !== null) {
+        verboseEl.textContent = receiverDiagnosticsPendingSnapshot;
+        receiverDiagnosticsPendingSnapshot = null;
+      }
+    }
+  });
 
   window.addEventListener(RECEIVER_DECODED_RX_EVENT, (event: Event) => {
     if (!(event instanceof CustomEvent)) return;
