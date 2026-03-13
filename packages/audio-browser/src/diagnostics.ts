@@ -1,4 +1,9 @@
 export interface InputTrackDiagnostics {
+  readonly deviceId: string | null;
+  readonly label: string | null;
+  readonly enabled: boolean;
+  readonly muted: boolean;
+  readonly readyState: string;
   readonly sampleRate: number | null;
   readonly channelCount: number | null;
   readonly echoCancellation: boolean | null;
@@ -154,6 +159,11 @@ function calculateLatencyDrift(
 export function readInputTrackDiagnostics(track: MediaStreamTrack): InputTrackDiagnostics {
   const settings = track.getSettings();
   return {
+    deviceId: settings.deviceId ?? null,
+    label: track.label ?? null,
+    enabled: track.enabled,
+    muted: track.muted,
+    readyState: track.readyState,
     sampleRate: settings.sampleRate ?? null,
     channelCount: settings.channelCount ?? null,
     echoCancellation: settings.echoCancellation ?? null,

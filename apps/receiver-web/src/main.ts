@@ -108,6 +108,8 @@ let injectedSamplesEventListener: ((event: Event) => void) | null = null;
 let receiverDiagnosticsFrozen = false;
 let receiverDiagnosticsPendingSnapshot: string | null = null;
 let receiverDiagnosticsPendingStatusSnapshot: string | null = null;
+let receiverLastDiagnosticsUpdateMs: number | null = null;
+let receiverDiagnosticsFrozenAtMs: number | null = null;
 let receiverDiagnosticsActiveTab: 'status' | 'verbose' = 'status';
 let receiverVerboseLogEntries: string[] = [];
 let receiverLastLoggedTransferState: string | null = null;
@@ -124,8 +126,9 @@ let lastCapture: {
 } | null = null;
 let waveformDebugBuffer: readonly WaveformDebugEntry[] = [];
 let lastPipelineFrameHex: string | null = null;
-let rxWorkletLastRms = 0;
-let rxWorkletLastPeak = 0;
+let rxWorkletLastRms: number | null = null;
+let rxWorkletLastPeak: number | null = null;
+let rxWorkletChunkCount = 0;
 const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   transfer: createInitialLiveDiagnostics({ state: 'LISTEN', currentTurnOwner: 'sender' }),
   sessionId: null,
@@ -184,6 +187,9 @@ function buildReceiverStatusSnapshot(data: unknown): Record<string, unknown> {
     timing: handshakeDiagnostics.transfer.timing,
     runtime: source.runtime ?? null,
     input: source.input ?? null,
+    inputClassification: source.inputClassification ?? null,
+    workletChunkCount: source.workletChunkCount ?? null,
+    rxStreamTapNodeAttached: source.rxStreamTapNodeAttached ?? null,
     levels: source.levels ?? null,
     graph: source.graph ?? null,
     audioContextState: source.audioContextState ?? null,
@@ -331,6 +337,9 @@ function buildReceiverVerboseSnapshot(data: unknown): unknown {
   if (typeof source.error === 'string') verboseSnapshot.error = source.error;
   if (source.runtime !== undefined) verboseSnapshot.runtime = source.runtime;
   if (source.input !== undefined) verboseSnapshot.input = source.input;
+  if (source.inputClassification !== undefined) verboseSnapshot.inputClassification = source.inputClassification;
+  if (source.workletChunkCount !== undefined) verboseSnapshot.workletChunkCount = source.workletChunkCount;
+  if (source.rxStreamTapNodeAttached !== undefined) verboseSnapshot.rxStreamTapNodeAttached = source.rxStreamTapNodeAttached;
   if (source.levels !== undefined) verboseSnapshot.levels = source.levels;
   if (source.audioContextState !== undefined) verboseSnapshot.audioContextState = source.audioContextState;
   if (source.linkTiming !== undefined) verboseSnapshot.linkTiming = source.linkTiming;
@@ -346,9 +355,70 @@ function buildReceiverVerboseSnapshot(data: unknown): unknown {
   return verboseSnapshot;
 }
 
-function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | null): void {
+function resetReceiverDiagnosticsCounters(): void {
+  // Clear transfer counters
+  const counters = handshakeDiagnostics.transfer.counters;
+  counters.framesTx = 0;
+  counters.framesRx = 0;
+  counters.burstsTx = 0;
+  counters.burstsRx = 0;
+  counters.retransmissions = 0;
+  counters.timeoutsHelloAck = 0;
+  counters.timeoutsBurstAck = 0;
+  counters.timeoutsFinal = 0;
+
+  // Clear pipeline counters
+  const rxp = handshakeDiagnostics.rxPipeline;
+  rxp.preambleDetectorHits = 0;
+  rxp.candidateFrameCount = 0;
+  rxp.demodAttempts = 0;
+  rxp.parserInvocations = 0;
+  rxp.detectorWindowsEvaluated = 0;
+  rxp.detectorOffsetsEvaluated = 0;
+  rxp.detectorPhaseBinsEvaluated = 0;
+  rxp.detectorBufferDroppedSamples = 0;
+
+  // Clear session specific diagnostics
+  handshakeDiagnostics.processedHelloCount = 0;
+  handshakeDiagnostics.invalidTurnEvents = 0;
+  handshakeDiagnostics.transferBytesSaved = 0;
+
+  appendReceiverVerboseLog('Receiver diagnostics counters reset by user.');
+}
+
+function buildConciseDebugReport(): string {
+  const rxp = handshakeDiagnostics.rxPipeline;
+  return [
+    `Receiver Report - ${new Date().toISOString()}`,
+    `State: ${handshakeDiagnostics.transfer.state} | Result: ${handshakeDiagnostics.handshakeResult}`,
+    `Diagnosis: ${rootQuery('#receiver-diagnosis-line')?.textContent ?? '?' }`,
+    `Pipeline Stage: ${rxp.detectorStageTruth}`,
+    `Preamble Match: Last=${rxp.lastPreambleCorrelationScore.toFixed(4)} Best=${rxp.bestPreambleCorrelationScore.toFixed(4)} (Thr: ${rxp.preambleThreshold})`,
+    `Counters: FramesRx=${handshakeDiagnostics.transfer.counters.framesRx} Hits=${rxp.preambleDetectorHits} Demod=${rxp.demodAttempts} CRC_Fail=${handshakeDiagnostics.transfer.failure.category === 'crc_failure' ? 'YES' : 'no'}`,
+    `Warning: ${rxp.warning ?? 'none'}`
+  ].join('\n');
+}
+
+function rootQuery(selector: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(selector);
+}
+
+function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | null, inputClass: string | null, isFrozen: boolean, timestampMs: number | null): void {
   const statsEl = root.querySelector<HTMLElement>('#receiver-live-stats');
   if (!statsEl) return;
+
+  const liveBadge = root.querySelector<HTMLElement>('#receiver-stats-live-badge');
+  if (liveBadge) {
+    if (isFrozen) {
+      liveBadge.textContent = `FROZEN at ${timestampMs ? new Date(timestampMs).toLocaleTimeString() : '?'}`;
+      liveBadge.style.background = '#607d8b';
+      statsEl.style.opacity = '0.7';
+    } else {
+      liveBadge.textContent = `LIVE - Last update: ${timestampMs ? new Date(timestampMs).toLocaleTimeString() : 'pending'}`;
+      liveBadge.style.background = '#4caf50';
+      statsEl.style.opacity = '1.0';
+    }
+  }
 
   const counters = handshakeDiagnostics.transfer.counters;
   const elapsedSec = handshakeDiagnostics.transfer.elapsedMs / 1000;
@@ -356,6 +426,53 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
   const goodputBps = elapsedSec > 0 ? Math.round((savedBytes * 8) / elapsedSec) : 0;
   const levelRms = levels?.rms ?? 0;
   const levelPeak = levels?.peakAbs ?? 0;
+
+  const diagnosisEl = root.querySelector<HTMLElement>('#receiver-diagnosis-line');
+  if (diagnosisEl) {
+    let msg = 'Waiting for signal';
+    let color = '#333';
+
+    if (handshakeDiagnostics.rxPipeline.warning) {
+      msg = handshakeDiagnostics.rxPipeline.warning;
+      color = '#f44336';
+    } else if (handshakeDiagnostics.transfer.failure.category !== 'none') {
+      msg = `Failure: ${handshakeDiagnostics.transfer.failure.reason ?? handshakeDiagnostics.transfer.failure.category}`;
+      color = '#f44336';
+    } else if (handshakeDiagnostics.transfer.state === 'SUCCEEDED') {
+      msg = 'Transfer complete';
+      color = '#4caf50';
+    } else if (handshakeDiagnostics.transfer.state !== 'LISTEN' && handshakeDiagnostics.transfer.state !== 'IDLE') {
+      msg = `Receiving transfer (${handshakeDiagnostics.transfer.state})`;
+      color = '#4caf50';
+    } else {
+      switch (handshakeDiagnostics.rxPipeline.detectorStageTruth) {
+        case 'no_signal':
+          msg = 'No input signal';
+          break;
+        case 'signal_but_no_detector_input':
+          msg = 'Audio present; routing to detector';
+          break;
+        case 'detector_input_present_but_low_correlation':
+          msg = 'Signal present but no preamble match';
+          break;
+        case 'preamble_candidate_found':
+          msg = 'Preamble matched; frame not yet decoded';
+          break;
+        case 'demod_reached':
+          msg = 'Candidate found; demodulating...';
+          break;
+        case 'parser_reached':
+          msg = 'Candidate found; parser reached';
+          break;
+        case 'parser_failed_or_crc_failed':
+          msg = 'Checksum or Parse failure';
+          color = '#f44336';
+          break;
+      }
+    }
+    diagnosisEl.textContent = msg;
+    diagnosisEl.style.color = color;
+  }
 
   const meterBar = root.querySelector<HTMLElement>('#receiver-input-meter-bar');
   const meterPeak = root.querySelector<HTMLElement>('#receiver-input-meter-peak');
@@ -368,20 +485,88 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
     meterBar.style.width = `${rmsPercent}%`;
     meterPeak.style.left = `${peakPercent}%`;
 
+    const classSuffix = inputClass && inputClass !== 'worklet_input_present' ? ` (${inputClass})` : '';
     if (levels?.clipping) {
       meterBar.style.backgroundColor = '#f44336';
-      meterLabel.textContent = 'Clipping';
+      meterLabel.textContent = `Clipping${classSuffix}`;
     } else if (levelRms >= RX_ACTIVITY_WARNING_RMS_THRESHOLD) {
       meterBar.style.backgroundColor = '#4caf50';
-      meterLabel.textContent = 'Signal present';
+      meterLabel.textContent = `Signal present${classSuffix}`;
     } else if (levelRms > 0) {
       meterBar.style.backgroundColor = '#4caf50';
-      meterLabel.textContent = 'Low input';
+      meterLabel.textContent = `Low input${classSuffix}`;
     } else {
       meterBar.style.backgroundColor = '#4caf50';
-      meterLabel.textContent = 'No input';
+      meterLabel.textContent = `No input${classSuffix}`;
     }
   }
+
+  const pBar = root.querySelector<HTMLElement>('#receiver-preamble-meter-bar');
+  const pThresh = root.querySelector<HTMLElement>('#receiver-preamble-meter-threshold');
+  const pLabel = root.querySelector<HTMLElement>('#receiver-preamble-meter-label');
+  if (pBar && pThresh && pLabel) {
+    const score = Math.max(handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore, handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore);
+    const thresh = handshakeDiagnostics.rxPipeline.preambleThreshold;
+    
+    pBar.style.width = `${Math.min(100, Math.max(0, score * 100))}%`;
+    pThresh.style.left = `${Math.min(100, Math.max(0, thresh * 100))}%`;
+
+    if (score >= thresh) {
+      pBar.style.backgroundColor = '#4caf50';
+      pLabel.textContent = `Locked (${score.toFixed(2)})`;
+    } else if (score >= thresh * 0.8) {
+      pBar.style.backgroundColor = '#ff9800';
+      pLabel.textContent = `Near lock (${score.toFixed(2)})`;
+    } else if (score > 0.1) {
+      pBar.style.backgroundColor = '#2196f3';
+      pLabel.textContent = `Weak match (${score.toFixed(2)})`;
+    } else {
+      pBar.style.backgroundColor = '#2196f3';
+      pLabel.textContent = `No match`;
+    }
+  }
+
+  const stages = {
+    audio: root.querySelector<HTMLElement>('#stage-badge-audio'),
+    detect: root.querySelector<HTMLElement>('#stage-badge-detect'),
+    candidate: root.querySelector<HTMLElement>('#stage-badge-candidate'),
+    demod: root.querySelector<HTMLElement>('#stage-badge-demod'),
+    parse: root.querySelector<HTMLElement>('#stage-badge-parse'),
+    session: root.querySelector<HTMLElement>('#stage-badge-session')
+  };
+
+  const updateBadge = (badge: HTMLElement | null, active: boolean) => {
+    if (!badge) return;
+    if (active) {
+      badge.style.background = '#4caf50';
+      badge.style.color = '#fff';
+    } else {
+      badge.style.background = '#eee';
+      badge.style.color = '#999';
+    }
+  };
+
+  const isSession = handshakeDiagnostics.transfer.state !== 'LISTEN' && handshakeDiagnostics.transfer.state !== 'IDLE';
+  updateBadge(stages.audio, handshakeDiagnostics.receiverRuntimeAttached && (levels?.rms ?? 0) > 0);
+  updateBadge(stages.detect, handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated > 0);
+  updateBadge(stages.candidate, handshakeDiagnostics.rxPipeline.preambleDetectorHits > 0 || handshakeDiagnostics.rxPipeline.candidateFrameCount > 0);
+  updateBadge(stages.demod, handshakeDiagnostics.rxPipeline.demodAttempts > 0);
+  updateBadge(stages.parse, handshakeDiagnostics.rxPipeline.parserInvocations > 0);
+  updateBadge(stages.session, isSession);
+
+  const tsState = root.querySelector<HTMLElement>('#ts-state');
+  const tsResult = root.querySelector<HTMLElement>('#ts-result');
+  const tsSession = root.querySelector<HTMLElement>('#ts-session');
+  const tsElapsed = root.querySelector<HTMLElement>('#ts-elapsed');
+  const tsGoodput = root.querySelector<HTMLElement>('#ts-goodput');
+  const tsRetries = root.querySelector<HTMLElement>('#ts-retries');
+  
+  if (tsState) tsState.textContent = handshakeDiagnostics.transfer.state;
+  if (tsResult) tsResult.textContent = handshakeDiagnostics.handshakeResult;
+  if (tsSession) tsSession.textContent = handshakeDiagnostics.sessionId !== null ? handshakeDiagnostics.sessionId.toString() : 'none';
+  if (tsElapsed) tsElapsed.textContent = elapsedSec.toFixed(2);
+  if (tsGoodput) tsGoodput.textContent = goodputBps.toString();
+  if (tsRetries) tsRetries.textContent = counters.retransmissions.toString();
 
   statsEl.textContent = [
     `RX volume RMS: ${levelRms.toFixed(4)} | Peak: ${levelPeak.toFixed(4)}`,
@@ -396,6 +581,7 @@ function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | n
     `State: ${handshakeDiagnostics.transfer.state} | Session: ${handshakeDiagnostics.sessionId ?? 'none'} | Handshake: ${handshakeDiagnostics.handshakeResult} | Runtime attached: ${handshakeDiagnostics.receiverRuntimeAttached ? 'yes' : 'no'}` ,
     `Safe PHY: carrier=${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz}Hz samplesPerChip=${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} amp=${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)} (tx/rx locked)`
   ].join('\n');
+}
 }
 
 function setReceiverDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose'): void {
@@ -412,6 +598,11 @@ function setReceiverDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose')
 
 function setReceiverDiagnosticsFrozen(root: HTMLElement, frozen: boolean): void {
   receiverDiagnosticsFrozen = frozen;
+  if (frozen) {
+    receiverDiagnosticsFrozenAtMs = Date.now();
+  } else {
+    receiverDiagnosticsFrozenAtMs = null;
+  }
   const freezeBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-freeze-toggle');
   const statusEl = root.querySelector<HTMLElement>('#receiver-diag-freeze-status');
   if (freezeBtn) {
@@ -419,8 +610,13 @@ function setReceiverDiagnosticsFrozen(root: HTMLElement, frozen: boolean): void 
   }
   if (statusEl) {
     statusEl.textContent = frozen
-      ? 'Diagnostics frozen (snapshot locked for copy).' : 'Diagnostics live (auto-updating).';
+      ? `Diagnostics frozen at ${new Date(receiverDiagnosticsFrozenAtMs!).toLocaleTimeString()} (snapshot locked for copy).`
+      : 'Diagnostics live (auto-updating).';
+    statusEl.style.color = frozen ? '#f44336' : '#2e7d32';
+    statusEl.style.fontWeight = frozen ? 'bold' : 'normal';
   }
+  // Immediate UI refresh for the live stats area visual state
+  renderReceiverLiveStats(root, null, null, frozen, frozen ? receiverDiagnosticsFrozenAtMs : receiverLastDiagnosticsUpdateMs);
 }
 
 async function copyTextToClipboard(text: string): Promise<void> {
@@ -447,6 +643,9 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
   const statusSnapshot = JSON.stringify(buildReceiverStatusSnapshot(data), null, 2);
   const levels = typeof data === 'object' && data !== null && 'levels' in data
     ? ((data as { levels?: AudioLevelSummary | null }).levels ?? null)
+    : null;
+  const inputClassification = typeof data === 'object' && data !== null && 'inputClassification' in data
+    ? ((data as { inputClassification?: string | null }).inputClassification ?? null)
     : null;
   const verboseEl = document.querySelector<HTMLElement>('#receiver-diag-verbose');
   if (!verboseEl) {
@@ -479,9 +678,10 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
     receiverDiagnosticsPendingSnapshot = receiverVerboseLogEntries.join('\n\n');
     return;
   }
+  receiverLastDiagnosticsUpdateMs = Date.now();
   el.textContent = statusSnapshot;
   verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
-  renderReceiverLiveStats(document, levels);
+  renderReceiverLiveStats(document, levels, inputClassification, false, receiverLastDiagnosticsUpdateMs);
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -609,8 +809,9 @@ function resetReceiverSessionState(): void {
     warning: null,
     detectorStageTruth: 'no_signal'
   };
-  rxWorkletLastRms = 0;
-  rxWorkletLastPeak = 0;
+  rxWorkletLastRms = null;
+  rxWorkletLastPeak = null;
+  rxWorkletChunkCount = 0;
   lastPipelineFrameHex = null;
 }
 
@@ -825,7 +1026,9 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     waveformDebugBuffer = [];
 
     let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
+    let lastIntervalChunkCount = rxWorkletChunkCount;
     graph.rxStreamTapNode?.port.addEventListener('message', (event) => {
+      rxWorkletChunkCount++;
       const detail = event.data as { samples?: Float32Array; rms?: number; peak?: number };
       if (typeof detail.rms === 'number') {
         rxWorkletLastRms = detail.rms;
@@ -842,9 +1045,21 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
 
     const intervalId = window.setInterval(() => {
       const analyserLevels = sampleAnalyserLevels(graph.rxAnalyser);
+      const isWorkletStalled = rxWorkletChunkCount === lastIntervalChunkCount;
+      lastIntervalChunkCount = rxWorkletChunkCount;
+      
+      let inputClassification = 'stale_or_unknown';
+      if (!isWorkletStalled && rxWorkletLastRms !== null) {
+        inputClassification = rxWorkletLastRms > 0 ? 'worklet_input_present' : 'no_input';
+      } else if (analyserLevels.rms > 0) {
+        inputClassification = 'analyser_only_input_present';
+      } else {
+        inputClassification = 'no_input';
+      }
+
       levels = {
-        rms: rxWorkletLastRms || analyserLevels.rms,
-        peakAbs: rxWorkletLastPeak || analyserLevels.peakAbs,
+        rms: (!isWorkletStalled && rxWorkletLastRms !== null) ? rxWorkletLastRms : analyserLevels.rms,
+        peakAbs: (!isWorkletStalled && rxWorkletLastPeak !== null) ? rxWorkletLastPeak : analyserLevels.peakAbs,
         clipping: analyserLevels.clipping
       };
       const toneFrequencyHz = graph.testToneFrequencyHz;
@@ -865,6 +1080,9 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
       renderDiagnostics(diagEl, {
         runtime: runtimeInfo,
         input: inputInfo,
+        inputClassification,
+        workletChunkCount: rxWorkletChunkCount,
+        rxStreamTapNodeAttached: !!graph.rxStreamTapNode,
         levels,
         graph: {
           rxPath: 'mic -> channel_splitter -> mono_downmix -> worklet_stream_ring -> detector -> demod -> decoder -> session_bridge (analyser is diagnostics only)',
@@ -950,23 +1168,82 @@ export function mountReceiverShell(root: HTMLElement): void {
         <input id="receiver-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" disabled />
         <label for="receiver-bandwidth">TX bandwidth Hz (safe locked)</label>
         <input id="receiver-bandwidth" type="number" min="200" max="6000" step="50" value="2000" disabled />
-        <button id="receiver-capture" type="button">Capture RX snapshot</button>
       </section>
 
       ${debugControls}
 
       <section>
-        <h2>Live modem stats</h2>
-        <div id="receiver-input-meter" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; font-family: monospace;">
-          <span>Input Level:</span>
-          <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc;">
-            <div id="receiver-input-meter-bar" style="height: 100%; background: #4caf50; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
-            <div id="receiver-input-meter-peak" style="position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0%; transition: left 0.1s linear;"></div>
-          </div>
-          <span id="receiver-input-meter-label">No input</span>
+        <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 1rem;">
+          <h2 style="margin: 0;">Live modem stats</h2>
+          <span id="receiver-stats-live-badge" style="font-family: sans-serif; font-size: 0.75em; padding: 2px 8px; border-radius: 12px; background: #4caf50; color: #fff; font-weight: bold;">LIVE</span>
         </div>
-        <pre id="receiver-live-stats">Waiting for receiver runtime.</pre>
+
+        <div id="rx-group-signal" style="margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #f0f0f0;">
+          <div id="receiver-input-meter" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; font-family: monospace;">
+            <span style="width: 120px; color: #666;">Input Level:</span>
+            <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc; border-radius: 2px;">
+              <div id="receiver-input-meter-bar" style="height: 100%; background: #4caf50; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
+              <div id="receiver-input-meter-peak" style="position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0%; transition: left 0.1s linear;"></div>
+            </div>
+            <span id="receiver-input-meter-label" style="width: 120px; font-size: 0.9em;">No input</span>
+          </div>
+
+          <div id="receiver-preamble-meter" style="display: flex; align-items: center; gap: 1rem; font-family: monospace;">
+            <span style="width: 120px; color: #666;" title="Preamble match">Preamble match:</span>
+            <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc; border-radius: 2px;">
+              <div id="receiver-preamble-meter-bar" style="height: 100%; background: #2196f3; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
+              <div id="receiver-preamble-meter-threshold" style="position: absolute; top: 0; bottom: 0; width: 2px; background: #000; left: 0%;"></div>
+            </div>
+            <span id="receiver-preamble-meter-label" style="width: 120px; font-size: 0.9em;">No match</span>
+          </div>
+        </div>
+
+        <div id="rx-group-detection" style="margin-bottom: 1.5rem;">
+          <div id="receiver-stage-strip" style="display: flex; gap: 0.5rem; margin-bottom: 0.75rem; font-family: sans-serif; font-size: 0.8em; font-weight: bold;">
+            <span id="stage-badge-audio" style="padding: 2px 6px; border-radius: 4px; background: #eee; color: #999;">AUDIO</span>
+            <span id="stage-badge-detect" style="padding: 2px 6px; border-radius: 4px; background: #eee; color: #999;">DETECT</span>
+            <span id="stage-badge-candidate" style="padding: 2px 6px; border-radius: 4px; background: #eee; color: #999;">CANDIDATE</span>
+            <span id="stage-badge-demod" style="padding: 2px 6px; border-radius: 4px; background: #eee; color: #999;">DEMOD</span>
+            <span id="stage-badge-parse" style="padding: 2px 6px; border-radius: 4px; background: #eee; color: #999;">PARSE</span>
+            <span id="stage-badge-session" style="padding: 2px 6px; border-radius: 4px; background: #eee; color: #999;">SESSION</span>
+          </div>
+          <h3 id="receiver-diagnosis-line" style="margin: 0; color: #333; font-size: 1.15em; min-height: 1.5em; font-family: sans-serif;">Waiting for receiver runtime</h3>
+        </div>
+
+        <div id="rx-group-session" style="margin-bottom: 1.5rem;">
+          <div id="receiver-transfer-status" style="display: flex; gap: 1rem; font-family: monospace; flex-wrap: wrap; background: #f0f8ff; padding: 0.75rem; border: 1px solid #b3d4fc; border-radius: 4px; font-size: 0.9em;">
+            <div><strong style="color: #555;">State:</strong> <span id="ts-state">LISTEN</span></div>
+            <div><strong style="color: #555;">Result:</strong> <span id="ts-result">pending</span></div>
+            <div><strong style="color: #555;">Session:</strong> <span id="ts-session">none</span></div>
+            <div><strong style="color: #555;">Elapsed:</strong> <span id="ts-elapsed">0.00</span>s</div>
+            <div><strong style="color: #555;">Goodput:</strong> <span id="ts-goodput">0</span>bps</div>
+            <div><strong style="color: #555;">Retries:</strong> <span id="ts-retries">0</span></div>
+          </div>
+        </div>
+
+        <details>
+          <summary style="cursor: pointer; font-weight: bold; margin-bottom: 0.5rem; font-size: 0.9em; color: #666;">Advanced details</summary>
+          <pre id="receiver-live-stats" style="font-size: 0.85em; background: #f8f9fa; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; overflow-x: auto; margin-top: 0;">Waiting for receiver runtime.</pre>
+        </details>
       </section>
+
+      <section>
+        <details>
+          <summary style="cursor: pointer; font-weight: bold; margin-bottom: 0.5rem;">Test tools (Manual bring-up)</summary>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <button id="receiver-capture" type="button">Capture RX snapshot</button>
+            <button id="receiver-copy-concise-report" type="button">Copy concise report</button>
+            <button id="receiver-reset-counters" type="button">Reset UI counters</button>
+          </div>
+          <div style="margin-top: 0.5rem; font-family: monospace; font-size: 0.85em; background: #eee; padding: 0.5rem; border-radius: 4px;">
+            <strong>PHY Constants (Safe Profile):</strong><br/>
+            Carrier: ${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz} Hz | 
+            Samples/Chip: ${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} | 
+            Amplitude: ${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)}
+          </div>
+        </details>
+      </section>
+
 
       <section>
         <h2>Diagnostics</h2>
@@ -996,7 +1273,10 @@ export function mountReceiverShell(root: HTMLElement): void {
   const startBtn = root.querySelector<HTMLButtonElement>('#receiver-start');
   const cancelBtn = root.querySelector<HTMLButtonElement>('#receiver-cancel');
   const captureBtn = root.querySelector<HTMLButtonElement>('#receiver-capture');
+  const conciseReportBtn = root.querySelector<HTMLButtonElement>('#receiver-copy-concise-report');
+  const resetCountersBtn = root.querySelector<HTMLButtonElement>('#receiver-reset-counters');
   const freezeDiagBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-freeze-toggle');
+
   const copyDiagBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-copy');
   const copyVerboseBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-copy-verbose');
   const statusTabBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-tab-status');
@@ -1130,6 +1410,24 @@ export function mountReceiverShell(root: HTMLElement): void {
 
   captureBtn.addEventListener('click', () => {
     captureRxSnapshot(diagEl);
+  });
+
+  conciseReportBtn?.addEventListener('click', () => {
+    void (async () => {
+      const report = buildConciseDebugReport();
+      try {
+        await copyTextToClipboard(report);
+        renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Concise debug report copied to clipboard.' });
+      } catch (e) {
+        renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, error: String(e), message: 'Failed to copy concise report.' });
+      }
+    })();
+  });
+
+  resetCountersBtn?.addEventListener('click', () => {
+    resetReceiverDiagnosticsCounters();
+    renderReceiverLiveStats(root, null, null, receiverDiagnosticsFrozen, receiverDiagnosticsFrozen ? receiverDiagnosticsFrozenAtMs : receiverLastDiagnosticsUpdateMs);
+    renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'UI diagnostics counters reset.' });
   });
 
   if (SHOW_DEBUG_CONTROLS && debugStorageInput) {

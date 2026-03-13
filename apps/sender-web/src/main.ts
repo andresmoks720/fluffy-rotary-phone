@@ -198,6 +198,62 @@ function renderSenderLiveStats(root: ParentNode, levels: AudioLevelSummary | nul
     ? Math.round((senderHarnessDiagnostics.transferBytesConfirmed / Math.max(elapsedSec, 1e-6)))
     : 0;
 
+  const diagnosisEl = root.querySelector<HTMLElement>('#sender-diagnosis-line');
+  if (diagnosisEl) {
+    let msg = 'Ready';
+    let color = '#333';
+    const state = senderHarnessDiagnostics.transfer.state;
+    const failure = senderHarnessDiagnostics.transfer.failure;
+
+    if (failure.category !== 'none') {
+      msg = `Failure: ${failure.reason ?? failure.category}`;
+      color = '#f44336';
+    } else if (state === 'SUCCEEDED') {
+      msg = 'Transfer complete';
+      color = '#4caf50';
+    } else if (state === 'SEND_BURST' || state === 'WAIT_BURST_ACK') {
+      msg = `Sending data (${state})`;
+      color = '#4caf50';
+    } else if (state === 'HELLO_TX' || state === 'WAIT_HELLO_ACK') {
+      msg = 'Handshake in progress';
+      color = '#2196f3';
+    } else if (state === 'WAIT_FINAL') {
+      msg = 'Wait for final confirmation';
+      color = '#ff9800';
+    } else if (senderRuntime) {
+      msg = 'Runtime active; ready to send';
+      color = '#4caf50';
+    }
+    diagnosisEl.textContent = msg;
+    diagnosisEl.style.color = color;
+  }
+
+  const meterBar = root.querySelector<HTMLElement>('#sender-input-meter-bar');
+  const meterPeak = root.querySelector<HTMLElement>('#sender-input-meter-peak');
+  const meterLabel = root.querySelector<HTMLElement>('#sender-input-meter-label');
+
+  if (meterBar && meterPeak && meterLabel) {
+    const rmsPercent = Math.min(100, Math.sqrt(levelRms) * 100);
+    const peakPercent = Math.min(100, Math.sqrt(levelPeak) * 100);
+    meterBar.style.width = `${rmsPercent}%`;
+    meterPeak.style.left = `${peakPercent}%`;
+    meterLabel.textContent = levelRms > 0.01 ? 'Signal present' : 'Idle';
+  }
+
+  const tsState = root.querySelector<HTMLElement>('#ts-state');
+  const tsTurn = root.querySelector<HTMLElement>('#ts-turn');
+  const tsSession = root.querySelector<HTMLElement>('#ts-session');
+  const tsElapsed = root.querySelector<HTMLElement>('#ts-elapsed');
+  const tsGoodput = root.querySelector<HTMLElement>('#ts-goodput');
+  const tsRetries = root.querySelector<HTMLElement>('#ts-retries');
+  
+  if (tsState) tsState.textContent = senderHarnessDiagnostics.transfer.state;
+  if (tsTurn) tsTurn.textContent = senderHarnessDiagnostics.currentTurnOwner;
+  if (tsSession) tsSession.textContent = senderHarnessDiagnostics.handshakeSessionId !== null ? senderHarnessDiagnostics.handshakeSessionId.toString() : 'none';
+  if (tsElapsed) tsElapsed.textContent = elapsedSec.toFixed(2);
+  if (tsGoodput) tsGoodput.textContent = goodputBps.toString();
+  if (tsRetries) tsRetries.textContent = counters.retransmissions.toString();
+
   statsEl.textContent = [
     `RX volume RMS: ${levelRms.toFixed(4)} | Peak: ${levelPeak.toFixed(4)}`,
     `Elapsed: ${elapsedSec.toFixed(2)} s | Goodput: ${goodputBps} bps | Accepted speed: ${acceptedSpeedBps} B/s`,
@@ -902,7 +958,30 @@ export function mountSenderShell(root: HTMLElement): void {
 
       <section>
         <h2>Live modem stats</h2>
-        <pre id="sender-live-stats">Waiting for sender runtime.</pre>
+        <h3 id="sender-diagnosis-line" style="margin-top: 0; color: #555; font-size: 1.1em; min-height: 1.5em;">Ready to start</h3>
+
+        <div id="sender-input-meter" style="display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; font-family: monospace;">
+          <span style="width: 120px;">Input Level:</span>
+          <div style="position: relative; width: 200px; height: 1.2rem; background: #eee; border: 1px solid #ccc;">
+            <div id="sender-input-meter-bar" style="height: 100%; background: #4caf50; width: 0%; transition: width 0.1s linear, background-color 0.1s;"></div>
+            <div id="sender-input-meter-peak" style="position: absolute; top: 0; bottom: 0; width: 2px; background: red; left: 0%; transition: left 0.1s linear;"></div>
+          </div>
+          <span id="sender-input-meter-label" style="width: 120px;">Idle</span>
+        </div>
+
+        <div id="sender-transfer-status" style="display: flex; gap: 1rem; font-family: monospace; margin-bottom: 1rem; flex-wrap: wrap; background: #fff9f0; padding: 0.5rem; border: 1px solid #ffd1b3; border-radius: 4px; font-size: 0.9em;">
+          <div><strong style="color: #666;">State:</strong> <span id="ts-state">IDLE</span></div>
+          <div><strong style="color: #666;">Turn:</strong> <span id="ts-turn">sender</span></div>
+          <div><strong style="color: #666;">Session:</strong> <span id="ts-session">none</span></div>
+          <div><strong style="color: #666;">Elapsed:</strong> <span id="ts-elapsed">0.00</span> s</div>
+          <div><strong style="color: #666;">Goodput:</strong> <span id="ts-goodput">0</span> bps</div>
+          <div><strong style="color: #666;">Retries:</strong> <span id="ts-retries">0</span></div>
+        </div>
+
+        <details>
+          <summary style="cursor: pointer; font-weight: bold; margin-bottom: 0.5rem;">Advanced details</summary>
+          <pre id="sender-live-stats" style="font-size: 0.85em; background: #f8f9fa; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; overflow-x: auto; margin-top: 0;">Waiting for sender runtime.</pre>
+        </details>
       </section>
 
       <section>
