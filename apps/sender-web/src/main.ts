@@ -12,7 +12,7 @@ import {
 import { FRAME_TYPES, PROFILE_IDS, RETRY_LIMITS, TIMEOUTS_MS } from '../../../packages/contract/src/index.js';
 import { crc32c } from '../../../packages/crc/src/index.js';
 import { decodeFrame } from '../../../packages/protocol/src/index.js';
-import { DEFAULT_SAFE_CARRIER_MODULATION, modulateSafeBpskToWaveform } from '../../../packages/phy-safe/src/index.js';
+import { DEFAULT_SAFE_CARRIER_MODULATION, modulateSafeFrameWithPreambleToWaveform } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
   decodeLiveFrameHex,
@@ -70,6 +70,7 @@ const SHOW_DEBUG_CONTROLS = new URLSearchParams(window.location.search).get('deb
 const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-ack-hex';
 const SENDER_DECODED_RX_EVENT = 'fluffy-rotary-phone:sender-decoded-rx-frame';
 const SENDER_WORKLET_MODULE_CANDIDATES = [
+  // Historical filename; processor now powers runtime RX telemetry integration.
   new URL('meter_processor.js', window.location.href).toString()
 ] as const;
 
@@ -178,8 +179,37 @@ function buildSenderVerboseSnapshot(data: unknown): unknown {
   return verboseSnapshot;
 }
 
+function renderSenderLiveStats(root: ParentNode, levels: AudioLevelSummary | null): void {
+  const statsEl = root.querySelector<HTMLElement>('#sender-live-stats');
+  if (!statsEl) return;
+
+  const counters = senderHarnessDiagnostics.transfer.counters;
+  const elapsedSec = senderHarnessDiagnostics.transfer.elapsedMs / 1000;
+  const goodputBps = elapsedSec > 0
+    ? Math.round((senderHarnessDiagnostics.transferBytesConfirmed * 8) / elapsedSec)
+    : 0;
+  const levelRms = levels?.rms ?? 0;
+  const levelPeak = levels?.peakAbs ?? 0;
+  const acceptedSpeedBps = senderHarnessDiagnostics.handshakeResult === 'accepted'
+    ? Math.round((senderHarnessDiagnostics.transferBytesConfirmed / Math.max(elapsedSec, 1e-6)))
+    : 0;
+
+  statsEl.textContent = [
+    `RX volume RMS: ${levelRms.toFixed(4)} | Peak: ${levelPeak.toFixed(4)}`,
+    `Elapsed: ${elapsedSec.toFixed(2)} s | Goodput: ${goodputBps} bps | Accepted speed: ${acceptedSpeedBps} B/s`,
+    `Frames TX/RX: ${counters.framesTx}/${counters.framesRx} | Bursts TX/RX: ${counters.burstsTx}/${counters.burstsRx}`,
+    `Retransmissions: ${counters.retransmissions} | Timeouts (HELLO/BURST/FINAL): ${counters.timeoutsHelloAck}/${counters.timeoutsBurstAck}/${counters.timeoutsFinal}`,
+    `CRC failures (header/payload): ${counters.crcFailuresHeader}/${counters.crcFailuresPayload} | Decode failures: ${counters.decodeFailures}`,
+    `State: ${senderHarnessDiagnostics.transfer.state} | Session: ${senderHarnessDiagnostics.handshakeSessionId ?? 'none'} | Handshake: ${senderHarnessDiagnostics.handshakeResult}`,
+    `Safe PHY: carrier=${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz}Hz samplesPerChip=${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} amp=${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)} (tx/rx locked)`
+  ].join('\n');
+}
+
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   const statusSnapshot = JSON.stringify(buildSenderStatusSnapshot(data), null, 2);
+  const levels = typeof data === 'object' && data !== null && 'levels' in data
+    ? ((data as { levels?: AudioLevelSummary | null }).levels ?? null)
+    : null;
   const verboseEl = document.querySelector<HTMLElement>('#sender-diag-verbose');
   if (!verboseEl) {
     return;
@@ -213,6 +243,7 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
   }
   el.textContent = statusSnapshot;
   verboseEl.textContent = senderVerboseLogEntries.join('\n\n');
+  renderSenderLiveStats(document, levels);
 }
 
 async function ensureAudioContextRunning(ctx: AudioContext): Promise<void> {
@@ -283,27 +314,6 @@ function readSelectedProfileId(root: HTMLElement): number {
 }
 
 
-function readTxCarrierFrequency(root: HTMLElement): number {
-  const input = root.querySelector<HTMLInputElement>('#sender-carrier-frequency');
-  const fallback = DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz;
-  if (!input) return fallback;
-  const parsed = Number(input.value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(8000, Math.max(200, parsed));
-}
-
-function readTxBandwidth(root: HTMLElement): number {
-  const input = root.querySelector<HTMLInputElement>('#sender-bandwidth');
-  if (!input) return 2000;
-  const parsed = Number(input.value);
-  if (!Number.isFinite(parsed)) return 2000;
-  return Math.min(6000, Math.max(200, parsed));
-}
-
-function deriveSamplesPerChip(sampleRateHz: number, bandwidthHz: number): number {
-  const raw = Math.round(sampleRateHz / bandwidthHz);
-  return Math.min(256, Math.max(4, raw));
-}
 function stopSenderRuntime(): void {
   if (!senderRuntime) return;
   window.clearInterval(senderRuntime.intervalId);
@@ -440,20 +450,17 @@ function updateHandshakeDiagnostics(): void {
   }
 }
 
-function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array, root: HTMLElement): void {
+function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array): void {
   if (runtime.ctx.state !== 'running') {
     void ensureAudioContextRunning(runtime.ctx);
   }
-  const carrierFrequencyHz = readTxCarrierFrequency(root);
-  const bandwidthHz = readTxBandwidth(root);
-  const chipSamples = deriveSamplesPerChip(runtime.ctx.sampleRate, bandwidthHz);
-  const waveform = modulateSafeBpskToWaveform(frameBytes, runtime.ctx.sampleRate, {
-    carrierFrequencyHz,
-    samplesPerChip: chipSamples,
+  const waveform = modulateSafeFrameWithPreambleToWaveform(frameBytes, runtime.ctx.sampleRate, {
+    carrierFrequencyHz: DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz,
+    samplesPerChip: DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip,
     amplitude: DEFAULT_SAFE_CARRIER_MODULATION.amplitude
   });
-  senderHarnessDiagnostics.txModulation.carrierFrequencyHz = carrierFrequencyHz;
-  senderHarnessDiagnostics.txModulation.bandwidthHz = bandwidthHz;
+  senderHarnessDiagnostics.txModulation.carrierFrequencyHz = DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz;
+  senderHarnessDiagnostics.txModulation.bandwidthHz = Math.round(runtime.ctx.sampleRate / DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
   const output = runtime.ctx.createBuffer(1, waveform.length, runtime.ctx.sampleRate);
   const channel = output.getChannelData(0);
   channel.set(waveform);
@@ -474,7 +481,7 @@ function playFrameOverTxPath(runtime: SenderRuntime, frameBytes: Uint8Array, roo
 function transmitFrames(frames: readonly Uint8Array[], root: HTMLElement): void {
   if (!senderRuntime || frames.length === 0) return;
   for (const frame of frames) {
-    playFrameOverTxPath(senderRuntime, frame, root);
+    playFrameOverTxPath(senderRuntime, frame);
   }
   senderHarnessDiagnostics.transfer.counters.framesTx += frames.length;
 }
@@ -531,7 +538,7 @@ async function transmitHelloOverTxPath(root: HTMLElement, diagEl: HTMLElement): 
     });
 
     pendingHelloBytes = helloBytes;
-    playFrameOverTxPath(senderRuntime, helloBytes, root);
+    playFrameOverTxPath(senderRuntime, helloBytes);
     senderHarnessDiagnostics.transfer.counters.framesTx += 1;
     senderHarnessDiagnostics.lastFailureReason = null;
     senderHarnessDiagnostics.transfer.failure.category = 'none';
@@ -741,7 +748,7 @@ async function startSender(root: HTMLElement, stateEl: HTMLElement, diagEl: HTML
         senderHarnessDiagnostics.transfer.counters.timeoutsHelloAck += 1;
         if (pendingHelloBytes !== null && senderHarnessDiagnostics.transfer.counters.timeoutsHelloAck <= RETRY_LIMITS.HELLO) {
           senderHarnessDiagnostics.transfer.counters.retransmissions += 1;
-          playFrameOverTxPath(senderRuntime, pendingHelloBytes, document.body);
+          playFrameOverTxPath(senderRuntime, pendingHelloBytes);
           senderHarnessDiagnostics.transfer.counters.framesTx += 1;
           senderHarnessDiagnostics.transfer.failure.category = 'timeout';
           senderHarnessDiagnostics.transfer.failure.reason = 'HELLO_ACK timeout in live sender shell; HELLO retransmitted.';
@@ -879,14 +886,19 @@ export function mountSenderShell(root: HTMLElement): void {
         <label for="sender-tone-frequency">Tone Hz</label>
         <input id="sender-tone-frequency" type="number" min="200" max="4000" step="50" value="1000" />
         <button id="sender-tone-toggle" type="button">Toggle test tone</button>
-        <label for="sender-carrier-frequency">TX carrier Hz</label>
-        <input id="sender-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" />
-        <label for="sender-bandwidth">TX bandwidth Hz</label>
-        <input id="sender-bandwidth" type="number" min="200" max="6000" step="50" value="2000" />
+        <label for="sender-carrier-frequency">TX carrier Hz (safe locked)</label>
+        <input id="sender-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" disabled />
+        <label for="sender-bandwidth">TX bandwidth Hz (safe locked)</label>
+        <input id="sender-bandwidth" type="number" min="200" max="6000" step="50" value="2000" disabled />
         <button id="sender-send-hello" type="button">Send HELLO</button>
       </section>
 
       ${debugControls}
+
+      <section>
+        <h2>Live modem stats</h2>
+        <pre id="sender-live-stats">Waiting for sender runtime.</pre>
+      </section>
 
       <section>
         <h2>Diagnostics</h2>

@@ -18,9 +18,9 @@ import { decodeFrame } from '../../../packages/protocol/src/index.js';
 import {
   DEFAULT_SAFE_CARRIER_MODULATION,
   demodulateSafeBpsk,
-  detectSafePreamble,
   generateSafePreamble,
-  modulateSafeBpskToWaveform
+  modulateSafeFrameWithPreambleToWaveform,
+  scanSafePreambleCorrelation
 } from '../../../packages/phy-safe/src/index.js';
 import {
   createInitialLiveDiagnostics,
@@ -83,6 +83,25 @@ interface ReceiverHandshakeDiagnostics {
     demodAttempts: number;
     parserInvocations: number;
     helloFramesSeen: number;
+    detectorWindowsEvaluated: number;
+    detectorInputRms: number;
+    detectorInputPeak: number;
+    lastPreambleCorrelationScore: number;
+    bestPreambleCorrelationScore: number;
+    preambleThreshold: number;
+    lastDetectorWindowSampleCount: number;
+    detectorLastActiveAtMs: number | null;
+    detectorLastEvaluatedAtMs: number | null;
+    detectorInputSource: 'rx_analyser_time_domain_snapshot';
+    detectorOffsetsEvaluated: number;
+    bestSampleOffset: number;
+    bestOffsetIndex: number;
+    bestOffsetCorrelationScore: number;
+    rxBufferedSamples: number;
+    minSamplesRequiredPreamble: number;
+    minSamplesRequiredHello: number;
+    minSamplesRequiredData: number;
+    frameTruncationDetected: boolean;
     channelPolicy: 'downmix_to_mono';
     warning: string | null;
   };
@@ -94,7 +113,11 @@ const LIVE_HELLO_ACK_STORAGE_KEY = 'fluffy-rotary-phone.live-harness.last-hello-
 const RECEIVER_DECODED_RX_EVENT = 'fluffy-rotary-phone:receiver-decoded-rx-frame';
 const RX_ACTIVITY_WARNING_AFTER_MS = 3000;
 const RX_ACTIVITY_WARNING_RMS_THRESHOLD = 0.01;
+const PREAMBLE_DETECTION_THRESHOLD = 0.92;
+const RX_ROLLING_BUFFER_MAX_SAMPLES = 262144;
+const RX_DETECTOR_SCAN_MAX_SAMPLES = 65536;
 const RECEIVER_WORKLET_MODULE_CANDIDATES = [
+  // Historical filename; processor now supports runtime RX pipeline diagnostics too.
   new URL('meter_processor.js', window.location.href).toString()
 ] as const;
 
@@ -116,9 +139,12 @@ let lastSeenHelloHex: string | null = null;
 let lastCapture: {
   readonly samples: readonly number[];
   readonly levels: AudioLevelSummary;
+  readonly source: 'rx_analyser_time_domain_snapshot';
 } | null = null;
 let waveformDebugBuffer: readonly WaveformDebugEntry[] = [];
 let lastPipelineFrameHex: string | null = null;
+let rxRollingSamples = new Float32Array(0);
+const minSampleRequirementsByRateHz = new Map<number, { preamble: number; hello: number; data: number }>();
 const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
   transfer: createInitialLiveDiagnostics({ state: 'LISTEN', currentTurnOwner: 'sender' }),
   sessionId: null,
@@ -148,6 +174,25 @@ const handshakeDiagnostics: ReceiverHandshakeDiagnostics = {
     demodAttempts: 0,
     parserInvocations: 0,
     helloFramesSeen: 0,
+    detectorWindowsEvaluated: 0,
+    detectorInputRms: 0,
+    detectorInputPeak: 0,
+    lastPreambleCorrelationScore: 0,
+    bestPreambleCorrelationScore: 0,
+    preambleThreshold: PREAMBLE_DETECTION_THRESHOLD,
+    lastDetectorWindowSampleCount: 0,
+    detectorLastActiveAtMs: null,
+    detectorLastEvaluatedAtMs: null,
+    detectorInputSource: 'rx_analyser_time_domain_snapshot',
+    detectorOffsetsEvaluated: 0,
+    bestSampleOffset: -1,
+    bestOffsetIndex: -1,
+    bestOffsetCorrelationScore: 0,
+    rxBufferedSamples: 0,
+    minSamplesRequiredPreamble: 0,
+    minSamplesRequiredHello: 0,
+    minSamplesRequiredData: 0,
+    frameTruncationDetected: false,
     channelPolicy: 'downmix_to_mono',
     warning: null
   }
@@ -217,6 +262,39 @@ function detectExpectedFrameLength(bytes: Uint8Array): number | null {
   return null;
 }
 
+function appendToRollingSamples(current: Float32Array, next: Float32Array, maxSamples: number): Float32Array {
+  if (next.length >= maxSamples) {
+    return next.slice(next.length - maxSamples);
+  }
+  const total = current.length + next.length;
+  if (total <= maxSamples) {
+    const merged = new Float32Array(total);
+    merged.set(current, 0);
+    merged.set(next, current.length);
+    return merged;
+  }
+  const keepFromCurrent = maxSamples - next.length;
+  const merged = new Float32Array(maxSamples);
+  merged.set(current.slice(current.length - keepFromCurrent), 0);
+  merged.set(next, keepFromCurrent);
+  return merged;
+}
+
+function computeMinSamplesRequired(sampleRateHz: number): { preamble: number; hello: number; data: number } {
+  const cached = minSampleRequirementsByRateHz.get(sampleRateHz);
+  if (cached) return cached;
+
+  const defaults = DEFAULT_SAFE_CARRIER_MODULATION;
+  const preambleChips = generateSafePreamble().length;
+  const computed = {
+    preamble: preambleChips * defaults.samplesPerChip,
+    hello: modulateSafeFrameWithPreambleToWaveform(new Uint8Array(34), sampleRateHz, defaults).length,
+    data: modulateSafeFrameWithPreambleToWaveform(new Uint8Array(24 + 512 + 4), sampleRateHz, defaults).length
+  };
+  minSampleRequirementsByRateHz.set(sampleRateHz, computed);
+  return computed;
+}
+
 function inferFrameTypeName(frameType: number): string {
   if (frameType === FRAME_TYPES.HELLO) return 'HELLO';
   if (frameType === FRAME_TYPES.DATA) return 'DATA';
@@ -229,33 +307,103 @@ function runReceiverDecodePipeline(samples: Float32Array, sampleRateHz: number):
   const samplesPerChip = DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip;
   handshakeDiagnostics.rxPipeline.rxPipelineStage = 'detector_attached';
   handshakeDiagnostics.rxPipeline.rxProcessorRole = 'rx_pipeline';
-  if (samples.length < samplesPerChip * (preamble.length + 8)) {
+  const minRequired = computeMinSamplesRequired(sampleRateHz);
+  handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble = minRequired.preamble;
+  handshakeDiagnostics.rxPipeline.minSamplesRequiredHello = minRequired.hello;
+  handshakeDiagnostics.rxPipeline.minSamplesRequiredData = minRequired.data;
+  handshakeDiagnostics.rxPipeline.rxBufferedSamples = samples.length;
+  const scanSamples = samples.length <= RX_DETECTOR_SCAN_MAX_SAMPLES
+    ? samples
+    : samples.subarray(samples.length - RX_DETECTOR_SCAN_MAX_SAMPLES);
+  handshakeDiagnostics.rxPipeline.lastDetectorWindowSampleCount = scanSamples.length;
+
+  let sumSquares = 0;
+  let peak = 0;
+  for (let i = 0; i < scanSamples.length; i += 1) {
+    const value = scanSamples[i] ?? 0;
+    const abs = Math.abs(value);
+    if (abs > peak) peak = abs;
+    sumSquares += value * value;
+  }
+  handshakeDiagnostics.rxPipeline.detectorInputRms = scanSamples.length === 0 ? 0 : Math.sqrt(sumSquares / scanSamples.length);
+  handshakeDiagnostics.rxPipeline.detectorInputPeak = peak;
+  handshakeDiagnostics.rxPipeline.detectorLastEvaluatedAtMs = Date.now();
+  handshakeDiagnostics.rxPipeline.detectorInputSource = 'rx_analyser_time_domain_snapshot';
+  handshakeDiagnostics.rxPipeline.frameTruncationDetected = false;
+
+  if (scanSamples.length < minRequired.preamble) {
     return null;
   }
 
-  const chipCount = Math.floor(samples.length / samplesPerChip);
-  const chips = new Float32Array(chipCount);
-  for (let chipIndex = 0; chipIndex < chipCount; chipIndex += 1) {
-    let sum = 0;
-    for (let sampleOffset = 0; sampleOffset < samplesPerChip; sampleOffset += 1) {
-      const sampleIndex = chipIndex * samplesPerChip + sampleOffset;
-      const sample = samples[sampleIndex] ?? 0;
-      const phase = (2 * Math.PI * DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz * sampleIndex) / sampleRateHz;
-      sum += sample * Math.sin(phase);
+  let bestDetection: {
+    sampleOffset: number;
+    bestIndex: number;
+    bestScore: number;
+    hit: { index: number; score: number } | null;
+    chips: Float32Array;
+  } | null = null;
+
+  for (let sampleOffset = 0; sampleOffset < samplesPerChip; sampleOffset += 1) {
+    const available = scanSamples.length - sampleOffset;
+    if (available < minRequired.preamble) continue;
+
+    const chipCount = Math.floor(available / samplesPerChip);
+    const chips = new Float32Array(chipCount);
+    for (let chipIndex = 0; chipIndex < chipCount; chipIndex += 1) {
+      let sum = 0;
+      for (let inChipOffset = 0; inChipOffset < samplesPerChip; inChipOffset += 1) {
+        const sampleIndex = sampleOffset + chipIndex * samplesPerChip + inChipOffset;
+        const sample = scanSamples[sampleIndex] ?? 0;
+        const phase = (2 * Math.PI * DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz * sampleIndex) / sampleRateHz;
+        sum += sample * Math.sin(phase);
+      }
+      chips[chipIndex] = sum >= 0 ? 1 : -1;
     }
-    chips[chipIndex] = sum >= 0 ? 1 : -1;
+
+    const detection = scanSafePreambleCorrelation(chips, PREAMBLE_DETECTION_THRESHOLD);
+    handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated += detection.windowsEvaluated;
+    handshakeDiagnostics.rxPipeline.detectorOffsetsEvaluated += 1;
+
+    if (
+      bestDetection === null
+      || detection.bestScore > bestDetection.bestScore
+      || (detection.hit !== null && bestDetection.hit === null)
+    ) {
+      bestDetection = {
+        sampleOffset,
+        bestIndex: detection.bestIndex,
+        bestScore: detection.bestScore,
+        hit: detection.hit,
+        chips
+      };
+    }
   }
 
-  const hit = detectSafePreamble(chips, 0.92);
-  if (!hit) {
+  if (bestDetection === null) {
     return null;
   }
 
+  handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore = bestDetection.bestScore;
+  handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore = Math.max(
+    handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore,
+    bestDetection.bestScore
+  );
+  handshakeDiagnostics.rxPipeline.bestSampleOffset = bestDetection.sampleOffset;
+  handshakeDiagnostics.rxPipeline.bestOffsetIndex = bestDetection.bestIndex;
+  handshakeDiagnostics.rxPipeline.bestOffsetCorrelationScore = bestDetection.bestScore;
+
+  if (!bestDetection.hit) {
+    return null;
+  }
+
+  handshakeDiagnostics.rxPipeline.detectorLastActiveAtMs = Date.now();
   handshakeDiagnostics.rxPipeline.preambleDetectorHits += 1;
   handshakeDiagnostics.rxPipeline.rxPipelineStage = 'demod_attached';
-  const dataChips = chips.subarray(hit.index + preamble.length);
+
+  const dataChips = bestDetection.chips.subarray(bestDetection.hit.index + preamble.length);
   const fullBytes = Math.floor(dataChips.length / 8);
   if (fullBytes < 20) {
+    handshakeDiagnostics.rxPipeline.frameTruncationDetected = true;
     return null;
   }
 
@@ -271,6 +419,7 @@ function runReceiverDecodePipeline(samples: Float32Array, sampleRateHz: number):
   handshakeDiagnostics.rxPipeline.rxPipelineStage = 'decoder_attached';
   const expectedLength = detectExpectedFrameLength(rawBytes);
   if (expectedLength === null || rawBytes.length < expectedLength) {
+    handshakeDiagnostics.rxPipeline.frameTruncationDetected = true;
     return null;
   }
 
@@ -296,6 +445,7 @@ function runReceiverDecodePipeline(samples: Float32Array, sampleRateHz: number):
   }
 }
 
+
 function updateRxPipelineWarning(levels: AudioLevelSummary): void {
   const elapsed = handshakeDiagnostics.transfer.elapsedMs;
   const hasActivity = handshakeDiagnostics.rxPipeline.preambleDetectorHits > 0
@@ -303,7 +453,23 @@ function updateRxPipelineWarning(levels: AudioLevelSummary): void {
     || handshakeDiagnostics.rxPipeline.demodAttempts > 0
     || handshakeDiagnostics.rxPipeline.parserInvocations > 0;
   if (elapsed >= RX_ACTIVITY_WARNING_AFTER_MS && levels.rms >= RX_ACTIVITY_WARNING_RMS_THRESHOLD && !hasActivity) {
-    handshakeDiagnostics.rxPipeline.warning = 'audio present but no decode pipeline activity';
+    if (handshakeDiagnostics.rxPipeline.rxBufferedSamples < handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble) {
+      handshakeDiagnostics.rxPipeline.warning = 'audio present but buffered samples are insufficient for preamble detection';
+      return;
+    }
+    if (handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated === 0) {
+      handshakeDiagnostics.rxPipeline.warning = 'audio present but no detector activity';
+      return;
+    }
+    if (handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore < handshakeDiagnostics.rxPipeline.preambleThreshold) {
+      handshakeDiagnostics.rxPipeline.warning = 'audio present but preamble correlation remains below threshold';
+      return;
+    }
+    if (handshakeDiagnostics.rxPipeline.frameTruncationDetected) {
+      handshakeDiagnostics.rxPipeline.warning = 'detector locked but buffered samples insufficient for frame decode';
+      return;
+    }
+    handshakeDiagnostics.rxPipeline.warning = 'audio present but detector candidates did not reach decode pipeline';
     return;
   }
   handshakeDiagnostics.rxPipeline.warning = null;
@@ -332,6 +498,30 @@ function buildReceiverVerboseSnapshot(data: unknown): unknown {
   if (source.decodedFrame !== undefined) verboseSnapshot.decodedFrame = source.decodedFrame;
   if (source.transferFrame !== undefined) verboseSnapshot.transferFrame = source.transferFrame;
   return verboseSnapshot;
+}
+
+function renderReceiverLiveStats(root: ParentNode, levels: AudioLevelSummary | null): void {
+  const statsEl = root.querySelector<HTMLElement>('#receiver-live-stats');
+  if (!statsEl) return;
+
+  const counters = handshakeDiagnostics.transfer.counters;
+  const elapsedSec = handshakeDiagnostics.transfer.elapsedMs / 1000;
+  const savedBytes = handshakeDiagnostics.transferBytesSaved;
+  const goodputBps = elapsedSec > 0 ? Math.round((savedBytes * 8) / elapsedSec) : 0;
+  const levelRms = levels?.rms ?? 0;
+  const levelPeak = levels?.peakAbs ?? 0;
+
+  statsEl.textContent = [
+    `RX volume RMS: ${levelRms.toFixed(4)} | Peak: ${levelPeak.toFixed(4)}`,
+    `Elapsed: ${elapsedSec.toFixed(2)} s | Goodput: ${goodputBps} bps | Bytes saved: ${savedBytes}`,
+    `Frames TX/RX: ${counters.framesTx}/${counters.framesRx} | Bursts TX/RX: ${counters.burstsTx}/${counters.burstsRx}`,
+    `Retransmissions: ${counters.retransmissions} | Timeouts (HELLO/BURST/FINAL): ${counters.timeoutsHelloAck}/${counters.timeoutsBurstAck}/${counters.timeoutsFinal}`,
+    `Detector windows: ${handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated} | Last corr: ${handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore.toFixed(4)} | Best corr: ${handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore.toFixed(4)} | Threshold: ${handshakeDiagnostics.rxPipeline.preambleThreshold.toFixed(2)}`,
+    `Detector hits/candidates: ${handshakeDiagnostics.rxPipeline.preambleDetectorHits}/${handshakeDiagnostics.rxPipeline.candidateFrameCount} | Demod/parser: ${handshakeDiagnostics.rxPipeline.demodAttempts}/${handshakeDiagnostics.rxPipeline.parserInvocations} | Warning: ${handshakeDiagnostics.rxPipeline.warning ?? 'none'}`,
+    `Buffer samples: ${handshakeDiagnostics.rxPipeline.rxBufferedSamples} | Min preamble/HELLO/DATA: ${handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredHello}/${handshakeDiagnostics.rxPipeline.minSamplesRequiredData} | Truncation: ${handshakeDiagnostics.rxPipeline.frameTruncationDetected ? 'yes' : 'no'}`,
+    `State: ${handshakeDiagnostics.transfer.state} | Session: ${handshakeDiagnostics.sessionId ?? 'none'} | Handshake: ${handshakeDiagnostics.handshakeResult}` ,
+    `Safe PHY: carrier=${DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz}Hz samplesPerChip=${DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip} amp=${DEFAULT_SAFE_CARRIER_MODULATION.amplitude.toFixed(2)} (tx/rx locked)`
+  ].join('\n');
 }
 
 function setReceiverDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose'): void {
@@ -381,6 +571,9 @@ async function copyTextToClipboard(text: string): Promise<void> {
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
   const statusSnapshot = JSON.stringify(buildReceiverStatusSnapshot(data), null, 2);
+  const levels = typeof data === 'object' && data !== null && 'levels' in data
+    ? ((data as { levels?: AudioLevelSummary | null }).levels ?? null)
+    : null;
   const verboseEl = document.querySelector<HTMLElement>('#receiver-diag-verbose');
   if (!verboseEl) {
     return;
@@ -414,6 +607,7 @@ function renderDiagnostics(el: HTMLElement, data: unknown): void {
   }
   el.textContent = statusSnapshot;
   verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
+  renderReceiverLiveStats(document, levels);
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -468,35 +662,10 @@ function applyDecodeClassification(classification: DecodedRxFrameEventDetail['cl
 }
 
 
-function readTxCarrierFrequency(root: HTMLElement): number {
-  const input = root.querySelector<HTMLInputElement>('#receiver-carrier-frequency');
-  const fallback = DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz;
-  if (!input) return fallback;
-  const parsed = Number(input.value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(8000, Math.max(200, parsed));
-}
-
-function readTxBandwidth(root: HTMLElement): number {
-  const input = root.querySelector<HTMLInputElement>('#receiver-bandwidth');
-  if (!input) return 2000;
-  const parsed = Number(input.value);
-  if (!Number.isFinite(parsed)) return 2000;
-  return Math.min(6000, Math.max(200, parsed));
-}
-
-function deriveSamplesPerChip(sampleRateHz: number, bandwidthHz: number): number {
-  const raw = Math.round(sampleRateHz / bandwidthHz);
-  return Math.min(256, Math.max(4, raw));
-}
-
-function playFrameOverTxPath(runtime: ReceiverRuntime, frameBytes: Uint8Array, root: HTMLElement): void {
-  const carrierFrequencyHz = readTxCarrierFrequency(root);
-  const bandwidthHz = readTxBandwidth(root);
-  const chipSamples = deriveSamplesPerChip(runtime.ctx.sampleRate, bandwidthHz);
-  const waveform = modulateSafeBpskToWaveform(frameBytes, runtime.ctx.sampleRate, {
-    carrierFrequencyHz,
-    samplesPerChip: chipSamples,
+function playFrameOverTxPath(runtime: ReceiverRuntime, frameBytes: Uint8Array): void {
+  const waveform = modulateSafeFrameWithPreambleToWaveform(frameBytes, runtime.ctx.sampleRate, {
+    carrierFrequencyHz: DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz,
+    samplesPerChip: DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip,
     amplitude: DEFAULT_SAFE_CARRIER_MODULATION.amplitude
   });
   const output = runtime.ctx.createBuffer(1, waveform.length, runtime.ctx.sampleRate);
@@ -519,6 +688,7 @@ function stopReceiverRuntime(): void {
   receiverRuntime = null;
   lastCapture = null;
   waveformDebugBuffer = [];
+  rxRollingSamples = new Float32Array(0);
 }
 
 async function registerReceiverWorklet(ctx: AudioContext): Promise<void> {
@@ -562,6 +732,25 @@ function resetReceiverSessionState(): void {
   handshakeDiagnostics.rxPipeline.demodAttempts = 0;
   handshakeDiagnostics.rxPipeline.parserInvocations = 0;
   handshakeDiagnostics.rxPipeline.helloFramesSeen = 0;
+  handshakeDiagnostics.rxPipeline.detectorWindowsEvaluated = 0;
+  handshakeDiagnostics.rxPipeline.detectorInputRms = 0;
+  handshakeDiagnostics.rxPipeline.detectorInputPeak = 0;
+  handshakeDiagnostics.rxPipeline.lastPreambleCorrelationScore = 0;
+  handshakeDiagnostics.rxPipeline.bestPreambleCorrelationScore = 0;
+  handshakeDiagnostics.rxPipeline.preambleThreshold = PREAMBLE_DETECTION_THRESHOLD;
+  handshakeDiagnostics.rxPipeline.lastDetectorWindowSampleCount = 0;
+  handshakeDiagnostics.rxPipeline.detectorLastActiveAtMs = null;
+  handshakeDiagnostics.rxPipeline.detectorLastEvaluatedAtMs = null;
+  handshakeDiagnostics.rxPipeline.detectorInputSource = 'rx_analyser_time_domain_snapshot';
+  handshakeDiagnostics.rxPipeline.detectorOffsetsEvaluated = 0;
+  handshakeDiagnostics.rxPipeline.bestSampleOffset = -1;
+  handshakeDiagnostics.rxPipeline.bestOffsetIndex = -1;
+  handshakeDiagnostics.rxPipeline.bestOffsetCorrelationScore = 0;
+  handshakeDiagnostics.rxPipeline.rxBufferedSamples = 0;
+  handshakeDiagnostics.rxPipeline.minSamplesRequiredPreamble = 0;
+  handshakeDiagnostics.rxPipeline.minSamplesRequiredHello = 0;
+  handshakeDiagnostics.rxPipeline.minSamplesRequiredData = 0;
+  handshakeDiagnostics.rxPipeline.frameTruncationDetected = false;
   handshakeDiagnostics.rxPipeline.warning = null;
   lastPipelineFrameHex = null;
 }
@@ -575,7 +764,8 @@ function captureRxSnapshot(diagEl: HTMLElement): void {
   const samples = captureAnalyserTimeDomain(receiverRuntime.graph.rxAnalyser, 32);
   lastCapture = {
     samples: Array.from(samples),
-    levels: summarizeAudioLevels(samples)
+    levels: summarizeAudioLevels(samples),
+    source: 'rx_analyser_time_domain_snapshot'
   };
 }
 
@@ -611,7 +801,7 @@ function processHelloHex(diagEl: HTMLElement, helloHex: string, writeDebugAckToS
     if (writeDebugAckToStorage) {
       window.localStorage.setItem(LIVE_HELLO_ACK_STORAGE_KEY, ackHex);
     }
-    playFrameOverTxPath(receiverRuntime, helloAckBytes, document.body);
+    playFrameOverTxPath(receiverRuntime, helloAckBytes);
     handshakeDiagnostics.transfer.counters.framesTx += 1;
     lastSeenHelloHex = helloHex;
     handshakeDiagnostics.lastFailureReason = null;
@@ -649,7 +839,7 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
       handshakeDiagnostics.transfer.counters.framesRx += 1;
       handshakeDiagnostics.transfer.counters.burstsRx += 1;
       const ack = receiverTransfer.emitBurstAck();
-      playFrameOverTxPath(receiverRuntime, ack, document.body);
+      playFrameOverTxPath(receiverRuntime, ack);
       handshakeDiagnostics.transfer.counters.framesTx += 1;
       handshakeDiagnostics.transfer.state = 'WAIT_DATA';
       renderDiagnostics(diagEl, {
@@ -665,7 +855,7 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
 
     if (detail.frameType === 'END') {
       const final = receiverTransfer.onEnd(frameBytes);
-      playFrameOverTxPath(receiverRuntime, final, document.body);
+      playFrameOverTxPath(receiverRuntime, final);
       handshakeDiagnostics.transfer.counters.framesRx += 1;
       handshakeDiagnostics.transfer.counters.framesTx += 1;
       lastFinalResponseHex = toHex(final);
@@ -778,8 +968,9 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
     let levels: AudioLevelSummary = { rms: 0, peakAbs: 0, clipping: false };
     const intervalId = window.setInterval(() => {
       levels = sampleAnalyserLevels(graph.rxAnalyser);
-      const decodeSamples = captureAnalyserTimeDomain(graph.rxAnalyser, graph.rxAnalyser.fftSize);
-      const pipelineEvent = runReceiverDecodePipeline(decodeSamples, runtimeInfo.sampleRate);
+      const decodeSlice = captureAnalyserTimeDomain(graph.rxAnalyser, graph.rxAnalyser.fftSize);
+      rxRollingSamples = appendToRollingSamples(rxRollingSamples, decodeSlice, RX_ROLLING_BUFFER_MAX_SAMPLES);
+      const pipelineEvent = runReceiverDecodePipeline(rxRollingSamples, runtimeInfo.sampleRate);
       if (pipelineEvent && pipelineEvent.frameHex.length > 0 && pipelineEvent.frameHex !== lastPipelineFrameHex) {
         lastPipelineFrameHex = pipelineEvent.frameHex;
         window.dispatchEvent(new CustomEvent(RECEIVER_DECODED_RX_EVENT, { detail: pipelineEvent }));
@@ -817,7 +1008,7 @@ async function startReceiver(stateEl: HTMLElement, diagEl: HTMLElement, isDebugS
         },
         handshake: handshakeDiagnostics,
         lastFinalResponseHex,
-        message: 'Receiver listening runtime initialized with active RX decode pipeline.'
+        message: 'Receiver listening runtime initialized with active RX decode pipeline (worklet module name remains meter_processor.js for compatibility).'
       });
       if (SHOW_DEBUG_CONTROLS && isDebugStorageEnabled()) {
         maybeProcessDebugHello(diagEl);
@@ -882,14 +1073,19 @@ export function mountReceiverShell(root: HTMLElement): void {
       <section>
         <button id="receiver-start" type="button">Start</button>
         <button id="receiver-cancel" type="button">Cancel</button>
-        <label for="receiver-carrier-frequency">TX carrier Hz</label>
-        <input id="receiver-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" />
-        <label for="receiver-bandwidth">TX bandwidth Hz</label>
-        <input id="receiver-bandwidth" type="number" min="200" max="6000" step="50" value="2000" />
+        <label for="receiver-carrier-frequency">TX carrier Hz (safe locked)</label>
+        <input id="receiver-carrier-frequency" type="number" min="200" max="8000" step="50" value="1500" disabled />
+        <label for="receiver-bandwidth">TX bandwidth Hz (safe locked)</label>
+        <input id="receiver-bandwidth" type="number" min="200" max="6000" step="50" value="2000" disabled />
         <button id="receiver-capture" type="button">Capture RX snapshot</button>
       </section>
 
       ${debugControls}
+
+      <section>
+        <h2>Live modem stats</h2>
+        <pre id="receiver-live-stats">Waiting for receiver runtime.</pre>
+      </section>
 
       <section>
         <h2>Diagnostics</h2>

@@ -10,7 +10,9 @@ import {
   generateSafePreamble,
   generateSafeTrainingBlock,
   modulateSafeBpsk,
-  modulateSafeBpskToWaveform
+  modulateSafeBpskToWaveform,
+  modulateSafeFrameWithPreambleToWaveform,
+  scanSafePreambleCorrelation
 } from '../src/index.js';
 
 describe('safe PHY constants', () => {
@@ -204,6 +206,28 @@ describe('safe PHY deterministic vectors and acquisition boundaries', () => {
     expect(() => detectSafePreamble(preamble, -0.1)).toThrow(/Threshold must be a finite number/);
     expect(() => detectSafePreamble(preamble, 1.1)).toThrow(/Threshold must be a finite number/);
   });
+
+
+
+  it('reports windows evaluated count for scan truthfully', () => {
+    const preamble = generateSafePreamble();
+    const stream = new Float32Array(preamble.length + 10);
+    stream.set(preamble, 3);
+    const scan = scanSafePreambleCorrelation(stream, 0.9);
+    expect(scan.windowsEvaluated).toBe(stream.length - preamble.length + 1);
+  });
+  it('reports best correlation score even when threshold is not reached', () => {
+    const preamble = generateSafePreamble();
+    const anti = new Float32Array(preamble.length);
+    for (let i = 0; i < preamble.length; i += 1) {
+      anti[i] = -preamble[i];
+    }
+
+    const scan = scanSafePreambleCorrelation(anti, 0.95);
+    expect(scan.hit).toBeNull();
+    expect(scan.bestIndex).toBe(0);
+    expect(scan.bestScore).toBe(-1);
+  });
 });
 
 describe('safe PHY BER and bit-order guarantees', () => {
@@ -246,6 +270,31 @@ describe('safe PHY BER and bit-order guarantees', () => {
 
 
 describe('safe BPSK carrier waveform mapping', () => {
+
+  it('prepends the deterministic safe preamble before payload chips on waveform path', () => {
+    const sampleRateHz = 48000;
+    const waveform = modulateSafeFrameWithPreambleToWaveform(Uint8Array.from([0x80]), sampleRateHz);
+    const preambleWaveform = modulateSafeBpskToWaveform(new Uint8Array(0), sampleRateHz);
+    const expectedPreambleSamples = generateSafePreamble().length * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip;
+
+    expect(preambleWaveform.length).toBe(0);
+    expect(waveform.length).toBe(expectedPreambleSamples + 8 * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
+
+    const chips = new Float32Array(generateSafePreamble().length + 8);
+    chips.set(generateSafePreamble(), 0);
+    chips.set(modulateSafeBpsk(Uint8Array.from([0x80])), generateSafePreamble().length);
+    const expected = new Float32Array(chips.length * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
+    for (let chipIndex = 0; chipIndex < chips.length; chipIndex += 1) {
+      const chip = chips[chipIndex] ?? 0;
+      for (let sampleOffset = 0; sampleOffset < DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip; sampleOffset += 1) {
+        const sampleIndex = chipIndex * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip + sampleOffset;
+        const phase = (2 * Math.PI * DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz * sampleIndex) / sampleRateHz;
+        expected[sampleIndex] = chip * DEFAULT_SAFE_CARRIER_MODULATION.amplitude * Math.sin(phase);
+      }
+    }
+    expect(Array.from(waveform.slice(0, expected.length))).toEqual(Array.from(expected));
+  });
+
   it('maps payload chips onto an audible carrier waveform', () => {
     const waveform = modulateSafeBpskToWaveform(Uint8Array.from([0x80]), 48000);
     expect(waveform.length).toBe(8 * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
