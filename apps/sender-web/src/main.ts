@@ -187,6 +187,20 @@ function renderSenderLiveStats(root: ParentNode, levels: AudioLevelSummary | nul
   const statsEl = root.querySelector<HTMLElement>('#sender-live-stats');
   if (!statsEl) return;
 
+  const liveBadge = root.querySelector<HTMLElement>('#sender-stats-live-badge');
+
+  if (liveBadge) {
+    if (senderDiagnosticsFrozen) {
+      liveBadge.textContent = `FROZEN`;
+      liveBadge.style.background = '#607d8b';
+      statsEl.style.opacity = '0.7';
+    } else {
+      liveBadge.textContent = `LIVE`;
+      liveBadge.style.background = '#4caf50';
+      statsEl.style.opacity = '1.0';
+    }
+  }
+
   const counters = senderHarnessDiagnostics.transfer.counters;
   const elapsedSec = senderHarnessDiagnostics.transfer.elapsedMs / 1000;
   const goodputBps = elapsedSec > 0
@@ -989,8 +1003,6 @@ export function mountSenderShell(root: HTMLElement): void {
       </section>
 
       ${debugControls}
-
-      </section>
 
       <section>
         <h2>Diagnostics</h2>
