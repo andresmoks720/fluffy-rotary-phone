@@ -6,6 +6,7 @@ export interface AudioGraphRuntime {
   readonly rxDownmixLeftGain: GainNode;
   readonly rxDownmixRightGain: GainNode;
   readonly rxDownmixMonoBus: GainNode;
+  readonly rxStreamTapNode: AudioWorkletNode | null;
   readonly txGain: GainNode;
   readonly outputGain: GainNode;
   readonly testToneFrequencyHz: number | null;
@@ -15,7 +16,15 @@ export interface AudioGraphRuntime {
   dispose(): void;
 }
 
-export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream): AudioGraphRuntime {
+export interface AudioGraphRuntimeOptions {
+  readonly rxWorkletProcessorName?: string;
+}
+
+export function createAudioGraphRuntime(
+  ctx: AudioContext,
+  stream: MediaStream,
+  options: AudioGraphRuntimeOptions = {}
+): AudioGraphRuntime {
   const source = ctx.createMediaStreamSource(stream);
   const rxDownmixSplitter = ctx.createChannelSplitter(2);
   const rxDownmixLeftGain = ctx.createGain();
@@ -29,13 +38,11 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
   rxDownmixMonoBus.gain.value = 1;
 
   const txGain = ctx.createGain();
-  // Keep TX path audible by default so test tone and frame playback are observable.
   txGain.gain.value = 1;
 
   const outputGain = ctx.createGain();
   outputGain.gain.value = 1;
 
-  // RX sample path: microphone -> deterministic mono downmix -> analyser.
   source.connect(rxDownmixSplitter);
   rxDownmixSplitter.connect(rxDownmixLeftGain, 0);
   rxDownmixSplitter.connect(rxDownmixRightGain, 1);
@@ -43,7 +50,18 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
   rxDownmixRightGain.connect(rxDownmixMonoBus);
   rxDownmixMonoBus.connect(rxAnalyser);
 
-  // TX/playback path skeleton: txGain -> outputGain -> destination.
+  let rxStreamTapNode: AudioWorkletNode | null = null;
+  if (options.rxWorkletProcessorName && typeof AudioWorkletNode !== 'undefined') {
+    rxStreamTapNode = new AudioWorkletNode(ctx, options.rxWorkletProcessorName, {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers'
+    });
+    rxDownmixMonoBus.connect(rxStreamTapNode);
+  }
+
   txGain.connect(outputGain);
   outputGain.connect(ctx.destination);
 
@@ -52,10 +70,7 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
   let testToneStartedAtMs: number | null = null;
 
   function stopTestTone(): void {
-    if (!testTone) {
-      return;
-    }
-
+    if (!testTone) return;
     testTone.stop();
     testTone.disconnect();
     testTone = null;
@@ -65,13 +80,11 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
 
   function startTestTone(frequencyHz = 1000): void {
     stopTestTone();
-
     const oscillator = ctx.createOscillator();
     oscillator.type = 'sine';
     oscillator.frequency.value = frequencyHz;
     oscillator.connect(txGain);
     oscillator.start();
-
     testTone = oscillator;
     testToneFrequencyHz = frequencyHz;
     testToneStartedAtMs = Date.now();
@@ -85,6 +98,7 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
     rxDownmixLeftGain,
     rxDownmixRightGain,
     rxDownmixMonoBus,
+    rxStreamTapNode,
     txGain,
     outputGain,
     get testToneFrequencyHz() {
@@ -103,6 +117,7 @@ export function createAudioGraphRuntime(ctx: AudioContext, stream: MediaStream):
       rxDownmixRightGain.disconnect();
       rxDownmixMonoBus.disconnect();
       rxAnalyser.disconnect();
+      rxStreamTapNode?.disconnect();
       txGain.disconnect();
       outputGain.disconnect();
     }

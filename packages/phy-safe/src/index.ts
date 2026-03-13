@@ -15,3 +15,11 @@ export {
   detectSafePreamble,
   scanSafePreambleCorrelation
 } from './phy.js';
+
+export {
+  LiveRxPipeline,
+  type LiveRxPipelineDiagnostics,
+  type DecodedRxFrameEventDetail,
+  type PushPcmOptions,
+  type LiveRxPipelineConfig
+} from './live_rx_pipeline.js';
