@@ -80,6 +80,11 @@ let helloTransmitInFlight: Promise<void> | null = null;
 let decodedRxEventListener: ((event: Event) => void) | null = null;
 let senderDiagnosticsFrozen = false;
 let senderDiagnosticsPendingSnapshot: string | null = null;
+let senderDiagnosticsPendingStatusSnapshot: string | null = null;
+let senderDiagnosticsActiveTab: 'status' | 'verbose' = 'status';
+let senderVerboseLogEntries: string[] = [];
+let senderLastLoggedTransferState: string | null = null;
+let senderLastLoggedHandshakeResult: string | null = null;
 const senderHandshake = new LiveSenderHandshake();
 let senderTransfer: LiveSenderTransfer | null = null;
 let lastSeenAckHex: string | null = null;
@@ -114,13 +119,88 @@ const senderHarnessDiagnostics: SenderHarnessDiagnostics = {
   }
 };
 
+function appendSenderVerboseLog(message: string, data?: unknown): void {
+  const timestamp = new Date().toISOString();
+  const payload = data === undefined ? '' : `\n${JSON.stringify(data, null, 2)}`;
+  senderVerboseLogEntries.push(`[${timestamp}] ${message}${payload}`.trimEnd());
+  if (senderVerboseLogEntries.length > 200) {
+    senderVerboseLogEntries = senderVerboseLogEntries.slice(senderVerboseLogEntries.length - 200);
+  }
+}
+
+function buildSenderStatusSnapshot(data: unknown): Record<string, unknown> {
+  return {
+    senderState: senderHarnessDiagnostics.transfer.state,
+    state: senderHarnessDiagnostics.transfer.state,
+    handshakeResult: senderHarnessDiagnostics.handshakeResult,
+    handshakeReason: senderHarnessDiagnostics.handshakeReason,
+    sessionId: senderHarnessDiagnostics.handshakeSessionId,
+    turnOwner: senderHarnessDiagnostics.currentTurnOwner,
+    startupStage: senderHarnessDiagnostics.runtimeStartup.stage,
+    runtimeStartup: senderHarnessDiagnostics.runtimeStartup,
+    lastFailureReason: senderHarnessDiagnostics.lastFailureReason,
+    failure: senderHarnessDiagnostics.transfer.failure,
+    counters: senderHarnessDiagnostics.transfer.counters,
+    timing: senderHarnessDiagnostics.transfer.timing,
+    bytesConfirmed: senderHarnessDiagnostics.transferBytesConfirmed,
+    frameTransmitAttempts: senderHarnessDiagnostics.frameTransmitAttempts,
+    invalidTurnEvents: senderHarnessDiagnostics.invalidTurnEvents,
+    note: typeof data === 'object' && data !== null && 'message' in data
+      ? (data as { message?: unknown }).message
+      : null,
+    error: typeof data === 'object' && data !== null && 'error' in data
+      ? (data as { error?: unknown }).error
+      : null,
+    latestEvent: data
+  };
+}
+
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
+  const statusSnapshot = JSON.stringify(buildSenderStatusSnapshot(data), null, 2);
   const snapshot = JSON.stringify(data, null, 2);
+  const verboseEl = document.querySelector<HTMLElement>('#sender-diag-verbose');
+  if (!verboseEl) {
+    return;
+  }
+
+  const message = typeof data === 'object' && data !== null && 'message' in data ? (data as { message?: unknown }).message : null;
+  const error = typeof data === 'object' && data !== null && 'error' in data ? (data as { error?: unknown }).error : null;
+  const transferState = senderHarnessDiagnostics.transfer.state;
+  const handshakeResult = senderHarnessDiagnostics.handshakeResult;
+  if (transferState !== senderLastLoggedTransferState) {
+    appendSenderVerboseLog(`Transfer state changed: ${senderLastLoggedTransferState ?? 'unset'} -> ${transferState}`);
+    senderLastLoggedTransferState = transferState;
+  }
+  if (handshakeResult !== senderLastLoggedHandshakeResult) {
+    appendSenderVerboseLog(`Handshake result changed: ${senderLastLoggedHandshakeResult ?? 'unset'} -> ${handshakeResult}`);
+    senderLastLoggedHandshakeResult = handshakeResult;
+  }
+  if (typeof message === 'string' && message.length > 0) {
+    appendSenderVerboseLog(`Status: ${message}`, data);
+  }
+  if (typeof error === 'string' && error.length > 0) {
+    appendSenderVerboseLog(`Error: ${error}`, data);
+  }
+
   if (senderDiagnosticsFrozen) {
+    senderDiagnosticsPendingStatusSnapshot = statusSnapshot;
     senderDiagnosticsPendingSnapshot = snapshot;
     return;
   }
-  el.textContent = snapshot;
+  el.textContent = statusSnapshot;
+  verboseEl.textContent = `${senderVerboseLogEntries.join('\n\n')}\n\n--- latest snapshot ---\n${snapshot}`;
+}
+
+function setSenderDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose'): void {
+  senderDiagnosticsActiveTab = tab;
+  const statusTabButton = root.querySelector<HTMLButtonElement>('#sender-diag-tab-status');
+  const verboseTabButton = root.querySelector<HTMLButtonElement>('#sender-diag-tab-verbose');
+  const statusPanel = root.querySelector<HTMLElement>('#sender-diag-panel-status');
+  const verbosePanel = root.querySelector<HTMLElement>('#sender-diag-panel-verbose');
+  if (statusTabButton) statusTabButton.disabled = tab === 'status';
+  if (verboseTabButton) verboseTabButton.disabled = tab === 'verbose';
+  if (statusPanel) statusPanel.hidden = tab !== 'status';
+  if (verbosePanel) verbosePanel.hidden = tab !== 'verbose';
 }
 
 function setSenderDiagnosticsFrozen(root: HTMLElement, frozen: boolean): void {
@@ -220,6 +300,8 @@ function resetSenderSessionState(): void {
   senderHarnessDiagnostics.handshakeReason = null;
   senderHarnessDiagnostics.transferBytesConfirmed = 0;
   senderHarnessDiagnostics.invalidTurnEvents = 0;
+  senderLastLoggedTransferState = null;
+  senderLastLoggedHandshakeResult = null;
 }
 
 
@@ -772,10 +854,22 @@ export function mountSenderShell(root: HTMLElement): void {
 
       <section>
         <h2>Diagnostics</h2>
+        <p>Use status for stable state; use verbose log for full event history and troubleshooting.</p>
+        <div>
+          <button id="sender-diag-tab-status" type="button">Status</button>
+          <button id="sender-diag-tab-verbose" type="button">Verbose log</button>
+        </div>
         <p id="sender-diag-freeze-status">Diagnostics live (auto-updating).</p>
         <button id="sender-diag-freeze-toggle" type="button">Freeze diagnostics</button>
         <button id="sender-diag-copy" type="button">Copy diagnostics</button>
-        <pre id="sender-diag">Diagnostics pending runtime initialization.</pre>
+        <section id="sender-diag-panel-status">
+          <h3>Status snapshot</h3>
+          <pre id="sender-diag">Diagnostics pending runtime initialization.</pre>
+        </section>
+        <section id="sender-diag-panel-verbose" hidden>
+          <h3>Verbose log and raw snapshot</h3>
+          <pre id="sender-diag-verbose">Verbose diagnostics pending runtime initialization.</pre>
+        </section>
       </section>
     </main>
   `;
@@ -788,6 +882,8 @@ export function mountSenderShell(root: HTMLElement): void {
   const sendHelloBtn = root.querySelector<HTMLButtonElement>('#sender-send-hello');
   const freezeDiagBtn = root.querySelector<HTMLButtonElement>('#sender-diag-freeze-toggle');
   const copyDiagBtn = root.querySelector<HTMLButtonElement>('#sender-diag-copy');
+  const statusTabBtn = root.querySelector<HTMLButtonElement>('#sender-diag-tab-status');
+  const verboseTabBtn = root.querySelector<HTMLButtonElement>('#sender-diag-tab-verbose');
   const debugStorageInput = root.querySelector<HTMLInputElement>('#sender-debug-storage');
   const debugAckInput = root.querySelector<HTMLInputElement>('#sender-debug-ack-hex');
   const debugAckProcessBtn = root.querySelector<HTMLButtonElement>('#sender-debug-ack-process');
@@ -796,26 +892,53 @@ export function mountSenderShell(root: HTMLElement): void {
     throw new Error('Missing sender shell elements');
   }
 
+  senderVerboseLogEntries = [];
+  appendSenderVerboseLog('Sender shell mounted. Diagnostics initialized.');
+  const verboseEl = root.querySelector<HTMLElement>('#sender-diag-verbose');
+  if (verboseEl) {
+    verboseEl.textContent = senderVerboseLogEntries.join('\n\n');
+  }
+  setSenderDiagnosticsTab(root, 'status');
   setSenderDiagnosticsFrozen(root, false);
+  renderDiagnostics(diagEl, { harness: senderHarnessDiagnostics, message: 'Diagnostics initialized; waiting for sender actions.' });
+
+  statusTabBtn?.addEventListener('click', () => {
+    setSenderDiagnosticsTab(root, 'status');
+  });
+  verboseTabBtn?.addEventListener('click', () => {
+    setSenderDiagnosticsTab(root, 'verbose');
+  });
 
   freezeDiagBtn.addEventListener('click', () => {
     const nextFrozen = !senderDiagnosticsFrozen;
     setSenderDiagnosticsFrozen(root, nextFrozen);
-    if (!nextFrozen && senderDiagnosticsPendingSnapshot !== null) {
-      diagEl.textContent = senderDiagnosticsPendingSnapshot;
-      senderDiagnosticsPendingSnapshot = null;
+    if (!nextFrozen) {
+      if (senderDiagnosticsPendingStatusSnapshot !== null) {
+        diagEl.textContent = senderDiagnosticsPendingStatusSnapshot;
+        senderDiagnosticsPendingStatusSnapshot = null;
+      }
+      if (senderDiagnosticsPendingSnapshot !== null) {
+        const verboseEl = root.querySelector<HTMLElement>('#sender-diag-verbose');
+        if (verboseEl) {
+          verboseEl.textContent = senderDiagnosticsPendingSnapshot;
+        }
+        senderDiagnosticsPendingSnapshot = null;
+      }
     }
   });
 
   copyDiagBtn.addEventListener('click', () => {
     void (async () => {
       const snapshot = diagEl.textContent ?? '';
+      const verboseSnapshot = root.querySelector<HTMLElement>('#sender-diag-verbose')?.textContent ?? '';
+      const activeSnapshot = senderDiagnosticsActiveTab === 'status' ? snapshot : verboseSnapshot;
       try {
-        await copyTextToClipboard(snapshot);
+        await copyTextToClipboard(activeSnapshot);
         renderDiagnostics(diagEl, {
           harness: senderHarnessDiagnostics,
           clipboard: {
-            copiedDiagnosticsChars: snapshot.length
+            copiedDiagnosticsChars: activeSnapshot.length,
+            copiedTab: senderDiagnosticsActiveTab
           },
           message: 'Diagnostics copied to clipboard.'
         });
