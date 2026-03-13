@@ -260,3 +260,39 @@ If forced to choose, prefer:
 - explicit recovery over optimistic assumptions
 - simple protocol behavior over fancy waveform tricks
 - measured results over aesthetic confidence
+
+
+---
+
+## Hard verification gate (mandatory)
+
+Before claiming success on any protocol, runtime, PHY, diagnostics, browser shell, or test-infrastructure change:
+1. run the strongest required verification command,
+2. inspect failures,
+3. fix failures,
+4. rerun until green (or explicitly report still-failing commands and why),
+5. state what remains unverified on real cable/hardware runtime.
+
+Never report reasoned-but-unrun success.
+
+If a bug class is missing a deterministic test, add the smallest deterministic reproducer before claiming the fix.
+
+## Verification command routing (mandatory)
+
+- Changes under `packages/contract`, `packages/crc`, or `packages/protocol`:
+  - run `pnpm verify:protocol`.
+- Changes under `packages/phy-safe`, browser audio/runtime plumbing, or session runtime bridge code:
+  - run `pnpm verify:runtime`.
+- Changes under `apps/*` or any cross-layer runtime + PHY/session path:
+  - run `pnpm verify:mvp`.
+
+When unsure, run `pnpm verify:mvp`.
+
+## Required implementation summary shape
+
+Every completion summary must explicitly list:
+1. files changed,
+2. tests added or updated,
+3. exact verification commands run,
+4. exact pass/fail status for each command,
+5. what remains unverified in real browser/cable runtime.

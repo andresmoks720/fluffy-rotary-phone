@@ -487,6 +487,23 @@ describe('sender web shell', () => {
     expect(verboseDiag).toContain('"copiedTarget": "verbose"');
   });
 
+
+
+  it('keeps sender safe PHY diagnostics locked to shared constants', async () => {
+    await import('../src/main.ts');
+
+    document.querySelector<HTMLButtonElement>('#sender-start')?.click();
+    for (let i = 0; i < 20 && document.querySelector('#sender-state')?.textContent !== 'ready'; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const liveStats = document.querySelector('#sender-live-stats')?.textContent ?? '';
+    expect(liveStats).toContain('Safe PHY: carrier=1500Hz');
+    expect(liveStats).toContain('samplesPerChip=24');
+    expect(liveStats).toContain('(tx/rx locked)');
+    expect(document.querySelector<HTMLInputElement>('#sender-carrier-frequency')?.disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>('#sender-bandwidth')?.disabled).toBe(true);
+  });
   it('keeps verbose event log concise without dynamic levels payloads', async () => {
     await import('../src/main.ts');
 

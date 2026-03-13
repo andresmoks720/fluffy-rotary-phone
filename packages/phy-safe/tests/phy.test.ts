@@ -316,3 +316,81 @@ describe('safe BPSK carrier waveform mapping', () => {
     })).toThrow(/positive integer/);
   });
 });
+
+
+describe('safe preamble offset tolerance for detector lock', () => {
+  function buildWaveform(chips: Float32Array, sampleRateHz: number, sampleOffset = 0): Float32Array {
+    const waveform = new Float32Array(chips.length * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip + sampleOffset);
+    for (let chipIndex = 0; chipIndex < chips.length; chipIndex += 1) {
+      const chip = chips[chipIndex] ?? 0;
+      for (let inChipOffset = 0; inChipOffset < DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip; inChipOffset += 1) {
+        const sampleIndex = sampleOffset + chipIndex * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip + inChipOffset;
+        const phase = (2 * Math.PI * DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz * sampleIndex) / sampleRateHz;
+        waveform[sampleIndex] = chip * DEFAULT_SAFE_CARRIER_MODULATION.amplitude * Math.sin(phase);
+      }
+    }
+    return waveform;
+  }
+
+  function downsampleToChips(waveform: Float32Array, sampleRateHz: number, sampleOffset: number): Float32Array {
+    const available = waveform.length - sampleOffset;
+    const chipCount = Math.floor(available / DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip);
+    const chips = new Float32Array(chipCount);
+    for (let chipIndex = 0; chipIndex < chipCount; chipIndex += 1) {
+      let sum = 0;
+      for (let inChipOffset = 0; inChipOffset < DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip; inChipOffset += 1) {
+        const sampleIndex = sampleOffset + chipIndex * DEFAULT_SAFE_CARRIER_MODULATION.samplesPerChip + inChipOffset;
+        const sample = waveform[sampleIndex] ?? 0;
+        const phase = (2 * Math.PI * DEFAULT_SAFE_CARRIER_MODULATION.carrierFrequencyHz * sampleIndex) / sampleRateHz;
+        sum += sample * Math.sin(phase);
+      }
+      chips[chipIndex] = sum >= 0 ? 1 : -1;
+    }
+    return chips;
+  }
+
+  it('locks preamble for non-zero offsets in at least half-chip deterministic coverage', () => {
+    const payload = Uint8Array.from([0xde, 0xad, 0xbe, 0xef]);
+    const sampleRateHz = 48000;
+    const frameWaveform = modulateSafeFrameWithPreambleToWaveform(payload, sampleRateHz);
+
+    const offsets = [1, 3, 7, 11, 17, 23];
+    let locks = 0;
+    for (const sampleOffset of offsets) {
+      const shifted = new Float32Array(frameWaveform.length + sampleOffset);
+      shifted.set(frameWaveform, sampleOffset);
+
+      const chips = downsampleToChips(shifted, sampleRateHz, sampleOffset);
+      const scan = scanSafePreambleCorrelation(chips, 0.92);
+      if (scan.hit !== null) {
+        locks += 1;
+      }
+      expect(scan.windowsEvaluated).toBe(chips.length - generateSafePreamble().length + 1);
+    }
+
+    expect(locks).toBeGreaterThanOrEqual(3);
+  });
+
+  it('maintains lock under mild deterministic noise with non-zero offset', () => {
+    const payload = Uint8Array.from([0x10, 0x20, 0x30, 0x40]);
+    const sampleRateHz = 48000;
+    const preamble = generateSafePreamble();
+    const chips = new Float32Array(preamble.length + modulateSafeBpsk(payload).length);
+    chips.set(preamble, 0);
+    chips.set(modulateSafeBpsk(payload), preamble.length);
+    const base = buildWaveform(chips, sampleRateHz, 5);
+
+    const noisy = new Float32Array(base.length);
+    let seed = 0x1234abcd;
+    for (let i = 0; i < base.length; i += 1) {
+      seed = (1664525 * seed + 1013904223) >>> 0;
+      const noise = ((seed / 0xffffffff) - 0.5) * 0.01;
+      noisy[i] = (base[i] ?? 0) + noise;
+    }
+
+    const demodChips = downsampleToChips(noisy, sampleRateHz, 5);
+    const scan = scanSafePreambleCorrelation(demodChips, 0.9);
+    expect(scan.hit).not.toBeNull();
+    expect(scan.windowsEvaluated).toBe(demodChips.length - preamble.length + 1);
+  });
+});
