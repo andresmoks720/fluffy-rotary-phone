@@ -184,6 +184,44 @@ describe('receiver web shell', () => {
 
 
 
+
+  it('drives input levels from detector diagnostics when detector buffer is populated', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSampleAnalyserLevels.mockReturnValue({ rms: 0, peakAbs: 0, clipping: false });
+      await import('../src/main.ts');
+      document.querySelector<HTMLButtonElement>('#receiver-start')?.click();
+      await vi.advanceTimersByTimeAsync(250);
+
+      emitWorkletSamples(new Float32Array([0.25, -0.25, 0.25, -0.25]), 0.2, 0.25);
+      await vi.advanceTimersByTimeAsync(250);
+
+      const firstDiagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
+      const firstDiag = JSON.parse(firstDiagRaw) as {
+        levels?: { rms?: number; peakAbs?: number };
+        rxPipeline?: { detectorInputRms?: number; detectorInputPeak?: number; detectorBufferFillSamples?: number };
+      };
+
+      expect(firstDiag.rxPipeline?.detectorBufferFillSamples).toBeGreaterThan(0);
+      expect(firstDiag.levels?.rms).toBe(firstDiag.rxPipeline?.detectorInputRms);
+      expect(firstDiag.levels?.peakAbs).toBe(firstDiag.rxPipeline?.detectorInputPeak);
+      expect(firstDiag.levels?.rms).toBeGreaterThan(0);
+
+      await vi.advanceTimersByTimeAsync(400);
+      const stalledDiagRaw = document.querySelector('#receiver-diag')?.textContent ?? '{}';
+      const stalledDiag = JSON.parse(stalledDiagRaw) as {
+        levels?: { rms?: number; peakAbs?: number };
+        rxPipeline?: { detectorInputRms?: number; detectorInputPeak?: number; detectorBufferFillSamples?: number };
+      };
+
+      expect(stalledDiag.rxPipeline?.detectorBufferFillSamples).toBeGreaterThan(0);
+      expect(stalledDiag.levels?.rms).toBe(stalledDiag.rxPipeline?.detectorInputRms);
+      expect(stalledDiag.levels?.peakAbs).toBe(stalledDiag.rxPipeline?.detectorInputPeak);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('decodes HELLO from worklet continuous PCM stream', async () => {
     const defaults = PROFILE_DEFAULTS[PROFILE_IDS.SAFE];
     const helloBytes = encodeFrame({
