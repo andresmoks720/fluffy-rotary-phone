@@ -83,6 +83,7 @@ let receiverStartInFlight: Promise<void> | null = null;
 let receiverDiagnosticsFrozen = false;
 let receiverDiagnosticsPendingSnapshot: string | null = null;
 let receiverDiagnosticsPendingStatusSnapshot: string | null = null;
+let receiverDiagnosticsActiveTab: 'status' | 'verbose' = 'status';
 let receiverVerboseLogEntries: string[] = [];
 let receiverLastLoggedTransferState: string | null = null;
 let receiverLastLoggedHandshakeResult: string | null = null;
@@ -142,10 +143,20 @@ function buildReceiverStatusSnapshot(data: unknown): Record<string, unknown> {
     failure: handshakeDiagnostics.transfer.failure,
     counters: handshakeDiagnostics.transfer.counters,
     timing: handshakeDiagnostics.transfer.timing,
+    runtime: source.runtime ?? null,
+    input: source.input ?? null,
+    levels: source.levels ?? null,
+    graph: source.graph ?? null,
+    audioContextState: source.audioContextState ?? null,
+    linkTiming: source.linkTiming ?? null,
+    rxCapture: source.rxCapture ?? null,
+    waveformDebug: source.waveformDebug ?? null,
+    decodedRxEvent: source.decodedRxEvent ?? RECEIVER_DECODED_RX_EVENT,
     bytesSaved: handshakeDiagnostics.transferBytesSaved,
     invalidTurnEvents: handshakeDiagnostics.invalidTurnEvents,
     processedHelloCount: handshakeDiagnostics.processedHelloCount,
     lastFinalResponseHex: source.lastFinalResponseHex ?? lastFinalResponseHex,
+    clipboard: source.clipboard ?? null,
     note: source.message ?? null,
     error: source.error ?? null
   };
@@ -167,7 +178,58 @@ function buildReceiverVerboseSnapshot(data: unknown): unknown {
   if (source.rxCapture !== undefined) verboseSnapshot.rxCapture = source.rxCapture;
   if (source.waveformDebug !== undefined) verboseSnapshot.waveformDebug = source.waveformDebug;
   if (source.decodedRxEvent !== undefined) verboseSnapshot.decodedRxEvent = source.decodedRxEvent;
+  if (source.graph !== undefined) verboseSnapshot.graph = source.graph;
+  if (source.clipboard !== undefined) verboseSnapshot.clipboard = source.clipboard;
+  if (source.handshake !== undefined) verboseSnapshot.handshake = source.handshake;
+  if (source.transfer !== undefined) verboseSnapshot.transfer = source.transfer;
+  if (source.decodedFrame !== undefined) verboseSnapshot.decodedFrame = source.decodedFrame;
+  if (source.transferFrame !== undefined) verboseSnapshot.transferFrame = source.transferFrame;
   return verboseSnapshot;
+}
+
+function setReceiverDiagnosticsTab(root: HTMLElement, tab: 'status' | 'verbose'): void {
+  receiverDiagnosticsActiveTab = tab;
+  const statusTabButton = root.querySelector<HTMLButtonElement>('#receiver-diag-tab-status');
+  const verboseTabButton = root.querySelector<HTMLButtonElement>('#receiver-diag-tab-verbose');
+  const statusPanel = root.querySelector<HTMLElement>('#receiver-diag-panel-status');
+  const verbosePanel = root.querySelector<HTMLElement>('#receiver-diag-panel-verbose');
+  if (statusTabButton) statusTabButton.disabled = tab === 'status';
+  if (verboseTabButton) verboseTabButton.disabled = tab === 'verbose';
+  if (statusPanel) statusPanel.hidden = tab !== 'status';
+  if (verbosePanel) verbosePanel.hidden = tab !== 'verbose';
+}
+
+function setReceiverDiagnosticsFrozen(root: HTMLElement, frozen: boolean): void {
+  receiverDiagnosticsFrozen = frozen;
+  const freezeBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-freeze-toggle');
+  const statusEl = root.querySelector<HTMLElement>('#receiver-diag-freeze-status');
+  if (freezeBtn) {
+    freezeBtn.textContent = frozen ? 'Resume diagnostics' : 'Freeze diagnostics';
+  }
+  if (statusEl) {
+    statusEl.textContent = frozen
+      ? 'Diagnostics frozen (snapshot locked for copy).' : 'Diagnostics live (auto-updating).';
+  }
+}
+
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const fallback = document.createElement('textarea');
+  fallback.value = text;
+  fallback.setAttribute('readonly', 'true');
+  fallback.style.position = 'fixed';
+  fallback.style.opacity = '0';
+  document.body.appendChild(fallback);
+  fallback.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(fallback);
+  if (!copied) {
+    throw new Error('Clipboard API unavailable and copy command failed.');
+  }
 }
 
 function renderDiagnostics(el: HTMLElement, data: unknown): void {
@@ -434,7 +496,14 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
       playFrameOverTxPath(receiverRuntime, ack, document.body);
       handshakeDiagnostics.transfer.counters.framesTx += 1;
       handshakeDiagnostics.transfer.state = 'WAIT_DATA';
-      renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Receiver processed DATA and transmitted BURST_ACK.' });
+      renderDiagnostics(diagEl, {
+        handshake: handshakeDiagnostics,
+        transferFrame: {
+          frameType: detail.frameType,
+          classification: detail.classification ?? 'ok'
+        },
+        message: 'Receiver processed DATA and transmitted BURST_ACK.'
+      });
       return;
     }
 
@@ -447,7 +516,15 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
       const saved = receiverTransfer.savedFileBytes();
       handshakeDiagnostics.transferBytesSaved = saved?.byteLength ?? 0;
       handshakeDiagnostics.transfer.state = saved ? 'SUCCEEDED' : 'FAILED';
-      renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, lastFinalResponseHex, message: 'Receiver processed END and transmitted FINAL response.' });
+      renderDiagnostics(diagEl, {
+        handshake: handshakeDiagnostics,
+        transferFrame: {
+          frameType: detail.frameType,
+          classification: detail.classification ?? 'ok'
+        },
+        lastFinalResponseHex,
+        message: 'Receiver processed END and transmitted FINAL response.'
+      });
       return;
     }
 
@@ -464,6 +541,15 @@ function processReceiverTransferFrame(diagEl: HTMLElement, detail: DecodedRxFram
 }
 
 function handleDecodedRxEvent(diagEl: HTMLElement, detail: DecodedRxFrameEventDetail): void {
+  renderDiagnostics(diagEl, {
+    handshake: handshakeDiagnostics,
+    decodedFrame: {
+      frameType: detail.frameType ?? null,
+      classification: detail.classification ?? 'ok',
+      frameHexBytes: detail.frameHex.length / 2
+    },
+    message: 'Received decoded RX frame event.'
+  });
   const normalizedFrameType = normalizeDecodedFrameType(detail.frameType);
   if (normalizedFrameType === 'HELLO') {
     processHelloHex(diagEl, detail.frameHex, false, detail.classification ?? 'ok');
@@ -641,16 +727,21 @@ export function mountReceiverShell(root: HTMLElement): void {
 
       <section>
         <h2>Diagnostics</h2>
-        <p>
-          <button id="receiver-diag-freeze-toggle" type="button">Freeze diagnostics</button>
-          <span id="receiver-diag-freeze-status">Diagnostics live (auto-updating).</span>
-        </p>
-        <section>
+        <p>Use status for stable state; use verbose log for full event history and troubleshooting.</p>
+        <div>
+          <button id="receiver-diag-tab-status" type="button">Status</button>
+          <button id="receiver-diag-tab-verbose" type="button">Verbose log</button>
+        </div>
+        <p id="receiver-diag-freeze-status">Diagnostics live (auto-updating).</p>
+        <button id="receiver-diag-freeze-toggle" type="button">Freeze diagnostics</button>
+        <button id="receiver-diag-copy" type="button">Copy diagnostics</button>
+        <button id="receiver-diag-copy-verbose" type="button">Copy verbose log</button>
+        <section id="receiver-diag-panel-status">
           <h3>Status snapshot</h3>
           <pre id="receiver-diag">Diagnostics pending runtime initialization.</pre>
         </section>
-        <section>
-          <h3>Verbose log</h3>
+        <section id="receiver-diag-panel-verbose" hidden>
+          <h3>Verbose event log</h3>
           <pre id="receiver-diag-verbose">Verbose diagnostics pending runtime initialization.</pre>
         </section>
       </section>
@@ -663,29 +754,38 @@ export function mountReceiverShell(root: HTMLElement): void {
   const cancelBtn = root.querySelector<HTMLButtonElement>('#receiver-cancel');
   const captureBtn = root.querySelector<HTMLButtonElement>('#receiver-capture');
   const freezeDiagBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-freeze-toggle');
+  const copyDiagBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-copy');
+  const copyVerboseBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-copy-verbose');
+  const statusTabBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-tab-status');
+  const verboseTabBtn = root.querySelector<HTMLButtonElement>('#receiver-diag-tab-verbose');
   const verboseEl = root.querySelector<HTMLElement>('#receiver-diag-verbose');
   const debugStorageInput = root.querySelector<HTMLInputElement>('#receiver-debug-storage');
   const debugHelloInput = root.querySelector<HTMLInputElement>('#receiver-debug-hello-hex');
   const debugHelloProcessBtn = root.querySelector<HTMLButtonElement>('#receiver-debug-hello-process');
 
-  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn || !freezeDiagBtn || !verboseEl) {
+  if (!stateEl || !diagEl || !startBtn || !cancelBtn || !captureBtn || !freezeDiagBtn || !copyDiagBtn || !copyVerboseBtn || !verboseEl) {
     throw new Error('Missing receiver shell elements');
   }
 
   receiverVerboseLogEntries = [];
+  receiverLastLoggedStatusMessage = null;
   appendReceiverVerboseLog('Receiver shell mounted. Diagnostics initialized.');
   verboseEl.textContent = receiverVerboseLogEntries.join('\n\n');
+  setReceiverDiagnosticsTab(root, 'status');
+  setReceiverDiagnosticsFrozen(root, false);
+  renderDiagnostics(diagEl, { handshake: handshakeDiagnostics, message: 'Diagnostics initialized; waiting for receiver actions.' });
+
+  statusTabBtn?.addEventListener('click', () => {
+    setReceiverDiagnosticsTab(root, 'status');
+  });
+  verboseTabBtn?.addEventListener('click', () => {
+    setReceiverDiagnosticsTab(root, 'verbose');
+  });
 
   freezeDiagBtn.addEventListener('click', () => {
-    receiverDiagnosticsFrozen = !receiverDiagnosticsFrozen;
-    freezeDiagBtn.textContent = receiverDiagnosticsFrozen ? 'Resume diagnostics' : 'Freeze diagnostics';
-    const statusEl = root.querySelector<HTMLElement>('#receiver-diag-freeze-status');
-    if (statusEl) {
-      statusEl.textContent = receiverDiagnosticsFrozen
-        ? 'Diagnostics frozen (snapshot locked for copy).'
-        : 'Diagnostics live (auto-updating).';
-    }
-    if (!receiverDiagnosticsFrozen) {
+    const nextFrozen = !receiverDiagnosticsFrozen;
+    setReceiverDiagnosticsFrozen(root, nextFrozen);
+    if (!nextFrozen) {
       if (receiverDiagnosticsPendingStatusSnapshot !== null) {
         diagEl.textContent = receiverDiagnosticsPendingStatusSnapshot;
         receiverDiagnosticsPendingStatusSnapshot = null;
@@ -695,6 +795,60 @@ export function mountReceiverShell(root: HTMLElement): void {
         receiverDiagnosticsPendingSnapshot = null;
       }
     }
+  });
+
+  copyDiagBtn.addEventListener('click', () => {
+    void (async () => {
+      const snapshot = diagEl.textContent ?? '';
+      try {
+        await copyTextToClipboard(snapshot);
+        renderDiagnostics(diagEl, {
+          handshake: handshakeDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: snapshot.length,
+            copiedTarget: 'status'
+          },
+          message: 'Diagnostics copied to clipboard.'
+        });
+      } catch (error) {
+        renderDiagnostics(diagEl, {
+          handshake: handshakeDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: 0,
+            copiedTarget: 'status',
+            error: String(error)
+          },
+          message: 'Failed to copy diagnostics to clipboard.'
+        });
+      }
+    })();
+  });
+
+  copyVerboseBtn.addEventListener('click', () => {
+    void (async () => {
+      const verboseSnapshot = root.querySelector<HTMLElement>('#receiver-diag-verbose')?.textContent ?? '';
+      try {
+        await copyTextToClipboard(verboseSnapshot);
+        renderDiagnostics(diagEl, {
+          handshake: handshakeDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: verboseSnapshot.length,
+            copiedTarget: 'verbose'
+          },
+          message: 'Verbose diagnostics copied to clipboard.'
+        });
+      } catch (error) {
+        renderDiagnostics(diagEl, {
+          handshake: handshakeDiagnostics,
+          clipboard: {
+            copiedDiagnosticsChars: 0,
+            copiedTarget: 'verbose',
+            error: String(error)
+          },
+          message: 'Failed to copy verbose diagnostics to clipboard.'
+        });
+      }
+    })();
   });
 
   window.addEventListener(RECEIVER_DECODED_RX_EVENT, (event: Event) => {
